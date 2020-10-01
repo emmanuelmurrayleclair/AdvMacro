@@ -8,5 +8,3 @@
 
 This repository contains solutions to problem sets. 
 
-test
-
