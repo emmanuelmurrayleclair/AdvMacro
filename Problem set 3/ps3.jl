@@ -1,8 +1,9 @@
 # Emmanuel Murray Leclair
-# Main scrip, problem set 3
+# Main script, problem set 3
 mkpath("Figures")
 using Plots
 using LinearAlgebra
+using PrettyTables
 include("ps3_func.jl")
 
 # Utility functions
@@ -21,19 +22,21 @@ function U_fn(x::Array{Float64,1},index::Int64,σ::Array)
 end
 σ = [2,5,10]
 
-# Grid for plots
+# Range of interpolation
 xaxis = range(0.05,2;length=1000);
 
 # Interpolation points to match
-n = [5,10,20]
+n = [5,10,20] # Number of points
 n_grid = 3
-inter_p(p) = collect(range(0.05,2;length=p))
+inter_p(p) = collect(range(0.05,2;length=p)) # function that divides the range (xaxis) into equally spaced interpolation points
 xi = Vector{Vector{Float64}}([inter_p(n[1]),inter_p(n[2]),inter_p(n[3])])
 
 n_f = 5 # Number of functions to interpolate
 for i in 1:n_f
     # y-grid is such that V(x) = ̃V(x) ∀ x=xi
     yi = Vector{Vector{Float64}}([U_fn(xi[1],i,σ),U_fn(xi[2],i,σ),U_fn(xi[3],i,σ)])
+    # True utility function V(x) - will be used as benchmark for all interpolation methods
+    V = U_fn(collect(xaxis),i,σ)
 
                 ### GLOBAL POLYNOMIAL INTERPOL WITH MONOMIAL BASIS (M) ###
     # Get polynomial coefficients
@@ -46,15 +49,13 @@ for i in 1:n_f
     for j in 1:n_grid
         Vtilde_m[:,j] = Vtilde(xaxis,a[j])
     end
-    # V(x)
-    V = U_fn(collect(xaxis),i,σ)
     # Plot the results
     gr()
     plt = plot(title="Interpolation n= (5,10,20) - Monomial Polynomial")
     plot!(xaxis,V,linewidth=3,color=:black,label = "True uitility function",legend=(0.75,0.75),foreground_color_legend = nothing,background_color_legend = nothing)
-    plot!(xaxis,Vtilde_m[:,1],color=:red,linestyle=:dash,linewidth=2,label="Interpolation - 5 points")
-    plot!(xaxis,Vtilde_m[:,2],color=:red,linestyle=:dot,linewidth=2,label="Interpolation - 10 points")
-    plot!(xaxis,Vtilde_m[:,3],color=:red,linestyle=:dashdot,linewidth=2,label="Interpolation - 20 points")
+    plot!(xaxis,Vtilde_m[:,1],linestyle=:dash,linewidth=2,label="Interpolation - 5 points")
+    plot!(xaxis,Vtilde_m[:,2],linestyle=:dot,linewidth=2,label="Interpolation - 10 points")
+    plot!(xaxis,Vtilde_m[:,3],linestyle=:dashdot,linewidth=2,label="Interpolation - 20 points")
     savefig("./Figures/global_mononial/U_fn$i.pdf")
 
             ### LOCAL INTERPOL WITH LINEAR SPLINE (LS) ###
@@ -74,9 +75,9 @@ for i in 1:n_f
     gr()
     plt = plot(title="Interpolation n= (5,10,20) - Linear spline")
     plot!(xaxis,V,linewidth=3,color=:black,label = "True uitility function",legend=(0.75,0.75),foreground_color_legend = nothing,background_color_legend = nothing)
-    plot!(xaxis,Vtilde_ls[:,1],color=:red,linestyle=:dash,linewidth=2,label="Interpolation - 5 points")
-    plot!(xaxis,Vtilde_ls[:,2],color=:red,linestyle=:dot,linewidth=2,label="Interpolation - 10 points")
-    plot!(xaxis,Vtilde_ls[:,3],color=:red,linestyle=:dashdot,linewidth=2,label="Interpolation - 20 points")
+    plot!(xaxis,Vtilde_ls[:,1],linestyle=:dash,linewidth=2,label="Interpolation - 5 points")
+    plot!(xaxis,Vtilde_ls[:,2],linestyle=:dot,linewidth=2,label="Interpolation - 10 points")
+    plot!(xaxis,Vtilde_ls[:,3],linestyle=:dashdot,linewidth=2,label="Interpolation - 20 points")
     savefig("./Figures/local_linspline/U_fn$i.pdf")
 
             ### LOCAL INTERPOL CUBIC SPLINE (CS) ###
@@ -109,8 +110,27 @@ for i in 1:n_f
     gr()
     plt = plot(title="Interpolation n= (5,10,20) - Cubic spline")
     plot!(xaxis,V,linewidth=3,color=:black,label = "True uitility function",legend=(0.75,0.75),foreground_color_legend = nothing,background_color_legend = nothing)
-    plot!(xaxis,Vtilde_cs[:,1],color=:red,linestyle=:dash,linewidth=2,label="Interpolation - 5 points")
-    plot!(xaxis,Vtilde_cs[:,2],color=:red,linestyle=:dot,linewidth=2,label="Interpolation - 10 points")
-    plot!(xaxis,Vtilde_cs[:,3],color=:red,linestyle=:dashdot,linewidth=2,label="Interpolation - 20 points")
+    plot!(xaxis,Vtilde_cs[:,1],linestyle=:dash,linewidth=2,label="Interpolation - 5 points")
+    plot!(xaxis,Vtilde_cs[:,2],linestyle=:dot,linewidth=2,label="Interpolation - 10 points")
+    plot!(xaxis,Vtilde_cs[:,3],linestyle=:dashdot,linewidth=2,label="Interpolation - 20 points")
     savefig("./Figures/local_cubspline/U_fn$i.pdf")
+
+    ## Assess interpolation accuracy with L2 norm (||V(x)-̃V(x)||_2) and print table
+    acc = zeros(3,3)
+    for j in 1:n_grid
+        acc[1,j] = (sum((V.-Vtilde_m[:,j]).^2))^(1/2)
+        acc[2,j] = (sum((V.-Vtilde_ls[:,j]).^2))^(1/2)
+        acc[3,j] = (sum((V.-Vtilde_cs[:,j]).^2))^(1/2)
+    end
+    data = Any["Global monomial" map(v->round(v,digits=3),acc[1,:])'; "Linear spline" map(v->round(v,digits=3),acc[2,:])'; "cubic spline" map(v->round(v,digits=3),acc[3,:])']
+    header = ["Interpolation method","5 grid points","10 grid points", "20 grid points"]
+    pretty_table(data,header,backend = :latex)
+
+    ## Plot interpolation accuracy as a function of grid size
+    gr()
+    plt = plot(title="Interpolation accuracy")
+    plot!(n,acc[1,:],linewidth=2,marker=(:diamond,5),label="Global monomial")
+    plot!(n,acc[2,:],linestyle=:dash,marker=(:diamond,5),linewidth=2,label="Linear spline")
+    plot!(n,acc[3,:],linewidth=2,marker=(:diamond,5),label="Cubic spline")
+    savefig("./Figures/accuracy_Ufn$i.png")
 end
