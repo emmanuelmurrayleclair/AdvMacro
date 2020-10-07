@@ -6,7 +6,7 @@ using LinearAlgebra
 using PrettyTables
 include("ps3_func.jl")
 
-                            ### QUESTION_1 AND 3 ###
+                            ### QUESTION_1 ###
 
 # Utility functions
 function U_fn(x::Array{Float64,1},index::Int64,σ::Array)
