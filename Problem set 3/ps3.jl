@@ -6,6 +6,8 @@ using LinearAlgebra
 using PrettyTables
 include("ps3_func.jl")
 
+                            ### QUESTION_1 ###
+
 # Utility functions
 function U_fn(x::Array{Float64,1},index::Int64,σ::Array)
     u_fn = Float64[]
@@ -132,5 +134,31 @@ for i in 1:n_f
     plot!(n,acc[1,:],linewidth=2,marker=(:diamond,5),label="Global monomial")
     plot!(n,acc[2,:],linestyle=:dash,marker=(:diamond,5),linewidth=2,label="Linear spline")
     plot!(n,acc[3,:],linewidth=2,marker=(:diamond,5),label="Cubic spline")
-    savefig("./Figures/accuracy_Ufn$i.png")
+    savefig("./Figures/accuracy_Ufn$i.pdf")
 end
+
+                        ### QUESTION_2 ###
+
+# CRRA Utility function with σ=5
+u(x) = (x.^(1-5))./(1-5)
+# Function that does interpolation using linear spline and returns interpolated function in range xaxis
+function linspline(yi,grid,xaxis)
+    xi = collect(grid)
+    n_range = length(xaxis)
+    ind_fn(xi,x) = findmax(sign.(xi.-x))[2]-1
+    ind = Array{Int64}(undef,n_range,1)
+    A_ls = zeros(n_range,1)
+    Vtilde_ls = zeros(n_range,1)
+    # Find indices for local interpolation
+    ind = map(x->ind_fn(xi,x),xaxis)
+    # Find local weights (A(x) and B(x)=1-A(x))
+    A_ls = (xi[ind.+1].-xaxis)./(xi[ind.+1].-xi[ind])
+    # Find ̃V(x)
+    Vtilde_ls = A_ls.*yi[ind].+ (-A_ls.+1).*yi[ind.+1]
+    return Vtilde_ls
+end
+# Call routine that finds optimal grid curvature for CRRA utility with σ=5 using linear spline for interpolation
+a = 0.05
+b = 2
+N = 10
+θ_opt = optimal_gridcurv(a,b,N,u,linspline)
