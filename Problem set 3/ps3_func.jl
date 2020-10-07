@@ -25,7 +25,7 @@ function optimal_gridcurv(a,b,N,F::Function,T::Function)
     # N: size of grid
     # F: function to interpolate
     # T: interpolation method
-    grid(θ) = a.+ (b-a).*(range(0,1,length=N).^θ) # function that maps a (0,1) grid of length n to a (a,b) grid of length n using polynomial scaling
+    grid(θ) = a.+ (b-a).*(range(0,1,length=N).^θ) # function that maps a (0,1) grid of length n to a (a,b) polynomial grid of length n using polynomial scaling
     xaxis = range(a,b;length=1000); # range to evaluate accuracy of inerpolation
     V = F(collect(xaxis)) # value of the function in all range
     θ_lb = 1 # lower bound on curvature (no curvature)
@@ -66,6 +66,9 @@ function optimal_gridcurv(a,b,N,F::Function,T::Function)
     tol = 10^-5 # tolerance level
     θ = Array{Float64}(undef, 1)  # intialize curvature
     V_diff = Array{Float64}(undef, 1) # initialize difference
+    Vtilde = Array{Float64}(undef, length(xaxis))
+    gridd = Array{Float64}(undef, N) # initialize grid points
+    V_grid = Array{Float64}(undef,N) # Initialize function at grid points
     n_iter = 1 # initizlize iteration
     while n_iter < nmax
         # find new points following golden rule
@@ -84,10 +87,16 @@ function optimal_gridcurv(a,b,N,F::Function,T::Function)
             θ_lb = aa
             θ = bb
             V_diff = V_diff_bb
+            Vtilde = Vtilde_bb
+            gridd = grid_bb
+            V_grid = V_grid_bb
         elseif V_diff_aa < V_diff_bb
             θ_ub = bb
             θ = aa
             V_diff = V_diff_aa
+            Vtilde = Vtilde_aa
+            gridd = grid_aa
+            V_grid = V_grid_aa
         end
         println("current iteration : (iter: $n_iter, theta: $θ, V_diff: $V_diff, |θ_ub-θ_lb|:$(θ_ub-θ_lb)")
         # Check if converged
@@ -97,5 +106,5 @@ function optimal_gridcurv(a,b,N,F::Function,T::Function)
         # If it didn't converge, go to the next iteration using bisection
         n_iter = n_iter + 1 # current iteration
     end
-    return θ
+    return (θ, V_diff, abs(θ_ub-θ_lb), n_iter, Vtilde, gridd, V_grid)
 end

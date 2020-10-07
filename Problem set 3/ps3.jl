@@ -6,7 +6,7 @@ using LinearAlgebra
 using PrettyTables
 include("ps3_func.jl")
 
-                            ### QUESTION_1 ###
+                            ### QUESTION_1 AND 3 ###
 
 # Utility functions
 function U_fn(x::Array{Float64,1},index::Int64,σ::Array)
@@ -26,7 +26,7 @@ end
 
 # Range of interpolation
 xaxis = range(0.05,2;length=1000);
-
+xaxis_extrapol = range(2,2.5,length=250)
 # Interpolation points to match
 n = [5,10,20] # Number of points
 n_grid = 3
@@ -161,4 +161,47 @@ end
 a = 0.05
 b = 2
 N = 10
-θ_opt = optimal_gridcurv(a,b,N,u,linspline)
+opt_curv = optimal_gridcurv(a,b,N,u,linspline)
+# Plot
+θ_opt = round(opt_curv[1],digits=3)
+Vtilde_opt = opt_curv[5]
+V_true = u(xaxis)
+gr()
+plt = plot(title="Interpolation with optimal grid curvature θ=$θ_opt, N=10")
+plot!(xaxis,Vtilde_opt,linewidth=2,label="Linear spline")
+plot!(xaxis,V_true,linewidth=2,label="True function")
+plot!(opt_curv[6],opt_curv[7],linetype=:scatter,marker=(:diamond,9),markercolor=RGB(0.5,0.1,0.1),label = "Data")
+savefig("./Figures/Question_2/optimal_grid.pdf")
+# Show results in table
+data = Any[opt_curv[1] opt_curv[2] opt_curv[3] opt_curv[4]]
+header = ["Optimal grid curvature θ","Sup norm of interpolated function vs true","Absolute differences in estimated θ", "Number of iterations to convergence"]
+pretty_table(data,header,backend = :latex)
+
+                        ### QUESTION_3 ###
+
+# Define x-axis all the way to 2.5 for extrapolation
+xaxis_extrapol = range(2,2.5,length=250)
+xaxis_all = range(0.02,2.5,length=1250)
+# Interpolation routine
+for i in 1:n_f
+    # y-grid is such that V(x) = ̃V(x) ∀ x=xi
+    yi = U_fn(xi[2],i,σ)
+    # True utility function V(x) - will be used as benchmark for all interpolation methods
+    V_all = U_fn(collect(xaxis_all),i,σ)
+
+                ### GLOBAL POLYNOMIAL INTERPOL WITH MONOMIAL BASIS (M) ###
+    # Get polynomial coefficients
+    a = mono_global(xi[2],yi)
+    # ̃V(x) with monomial polynomial coefficients
+    Vtilde(x,a) = sum(a[m]*(x.^(m-1)) for m=1:length(a))
+    Vtilde_m = zeros(length(xaxis),n_grid) #
+    Vtilde_m = Vtilde(xaxis,a) # Interpolated function within boundaries
+    Vtilde_m_extrapol = Vtilde(xaxis_extrapol,a) # extrapolation of interpolated function
+    # Plot the results
+    gr()
+    plt = plot(title="Interpolation n= 10 - Monomial Polynomial")
+    plot!(xaxis_all,V_all,linewidth=2,color=:black,label = "True uitility function",foreground_color_legend = nothing,background_color_legend = nothing)
+    plot!(xaxis,Vtilde_m,linestyle=:dash,linewidth=2,label="Interpolation - 10 points")
+    plot!(xaxis_extrapol,Vtilde_m_extrapol,linestyle=:dash,linewidth=2,label="Extrapolation")
+    savefig("./Figures/Extrapolation/U_fn$i.pdf")
+end
