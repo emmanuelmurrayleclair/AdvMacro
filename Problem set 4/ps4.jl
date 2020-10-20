@@ -12,7 +12,7 @@ include("Scaled_Interpolation_Functions.jl")
 
 # Paramters
     # Generate structure for parameters using Parameters module
-    # Set default values forparameters
+    # Set default values for parameters
     @with_kw struct Par
         # Model Parameters
         z::Float64 = 1    ; # Productivity
@@ -63,7 +63,6 @@ println(" ")
 function get_chi(p::Par,l_ss,c_ss,k_ss)
     @unpack z, α, β, δ, σ, η = p
     chi = (c_ss^(-σ))*z*(1-α)*(k_ss^α)*(l_ss^(-α-η))
-    #chi = ((1-α)*(gam^α)*z)/(((z*(gam^α)-δ*gam)^σ)*(l^(1/(σ+η))))
     return chi
 end
 global χ = get_chi(p,l_ss,c_ss,k_ss)
@@ -94,22 +93,54 @@ function Euler_Error(k,kp,kpp,l,lp,p::Par)
     return (RHS./LHS.-1).*100
 end
 
-# Period utility function
-function utility(k,kp,l,p::Par)
+# Period utility function with penalty
+function utility(k,kp,l,a,p::Par) # a is penalty coefficent for quadratic loss
     @unpack α,δ,σ,z,η,c_min = p
     c = z*(k^α)*(l^(1-α))+(1-δ)*k-kp # Consumption from resource constraint
+    c_max = z*(k^α)*(l^(1-α))+(1-δ)*k # maximum amount of consumption allowable
     u_c = 0; # intialize utility from consumption
     # Utility of consumption
-    if c>c_min
-        u_c = (c^(1-σ))/(1-σ)
+    if c<=c_min
+        u_c = (c_min^(1-σ))/(1-σ) - a*((c-c_min)^2)
+    elseif c>=c_max
+        u_c = (c_max^(1-σ))/(1-σ) - a*((c-c_max)^2)
     else
-        u_c = (c_min^(1-σ))/(1-σ)
+        u_c = (c^(1-σ))/(1-σ)
     end
+    # Disutility of labor
+    l_min = 1E-16
+    l_max = 1.0
+    if l >= l_max
+        u_l = χ*((l_max^(1+η))/(1+η)) + a*((l-l_max)^2) # penalty for being above l_max
+    elseif l <= l_min
+        u_l = χ*((l_min^(1+η))/(1+η)) + a*((l-l_min)^2) # penalty for being below l_min
+    else
+        u_l = χ*((l^(1+η))/(1+η))
+    end
+    return u_c-u_l
+end
+
+# Unrestricted utility function (no penalty)
+function utility_unr(k,kp,l,p::Par)
+    @unpack α,δ,σ,z,η,c_min = p
+    u_c = 0; # intialize utility from consumption
+    # Utility of consumption
+    c = z*(k^α)*(l^(1-α))+(1-δ)*k-kp # Consumption from resource constraint
+    u_c = (c^(1-σ))/(1-σ)
     # Disutility of labor
     u_l = χ*((l^(1+η))/(1+η))
     return u_c-u_l
 end
-# Derivative of utility function wrt labor
+
+# Derivative of utility (unrestricted)
+function d_utility_kp0(k,kp,l,p::Par)
+    return ForwardDiff.derivative(x->utility_unr(k,x,l,p),kp)
+end
+function d_utility_l0(k,kp,l,p::Par)
+    return ForwardDiff.derivative(x->utility_unr(k,kp,x,p),l)
+end
+
+# Derivative of utility function wrt labor l
 function d_utility_l(k,kp,l,p::Par)
     @unpack α,δ,σ,z,η,c_min = p
     c = z*(k^α)*(l^(1-α))+(1-δ)*k-kp
@@ -120,6 +151,18 @@ function d_utility_l(k,kp,l,p::Par)
         d_u = c_min^(-σ)
     end
     return d_u*z*(k^α)*(1-α)*(l^(-α))-χ*(l^η)
+end
+# Derivative of utility function wrt capital k'
+function d_utility_kp(k,kp,l,p::Par)
+    @unpack α,δ,σ,z,η,c_min = p
+    c = z*(k^α)*(l^(1-α))+(1-δ)*k-kp
+    d_u = 0
+    if c>c_min
+        d_u = c^(-σ)
+    else
+        d_u = c_min^(-σ)
+    end
+    return -d_u
 end
 
 # Generate structure of model objects
@@ -240,14 +283,29 @@ function T_mvariate_max(M::Model)
     @unpack p, n_k, k_grid, V, G_kp, G_c, G_l = M
     @unpack β,α,z,δ,c_min = p
     # Interpolate current iteration of value function v(k') so I can evaluate it at any k'
-    Vp = ScaledInterpolations(k_grid,V, FritschButlandMonotonicInterpolation()) # Impose monotonicity because I know it is increasing in capital
-    # Define function that returns objective function for a given triple (k,k'=x[1],l=x[2])
-    Obj_fn(k,x,p) = -utility(k,x[1],x[2],p) - β*Vp.(x[1])
+    Vp = ScaledInterpolations(k_grid,V, BSpline(Cubic(Line(OnGrid())))) # Impose monotonicity because I know it is increasing in capital
+    # Define derivative of value function wrt capital k'
+    #dVp(x) = ForwardDiff.derivative(Vp,x)
+    # Define function that returns objective function for a given triple (k,k',l)
+    function Obj_fn(k,kp,l,a,p::Par)
+        if kp < k_grid[1]
+            return -utility(k,kp,l,a,p) - β*Vp.(k_grid[1])
+        elseif kp > k_grid[end]
+            return -utility(k,kp,l,a,p) - β*Vp.(k_grid[end])
+        else
+            return -utility(k,kp,l,a,p) - β*Vp.(kp)
+        end
+    end
+    #Obj_fn(k,kp,l,a,p::Par) = -utility(k,kp,l,a,p) - β*Vp.(kp)
+    # Derivative of objective function wrt capital k'
+    #d_Obj_fn_kp(k,kp,l,p::Par) = d_utility_kp(k,kp,l,p) + β*dVp.(kp)
+    # Derivative of objective function wrt labor l
+    #d_Obj_fn_l(k,kp,l,p::Par) = d_utility_l(k,kp,l,p)
     # Define boundaries on capital tomorrow k' and on labor l
     l_min = 1E-16
     l_max = 1.0
-    #kp_min = 1.001*k_grid[1]
-    kp_min = 0.0001
+    kp_min = 1.001*k_grid[1]
+    #kp_min = 0.0001
     get_kp_max(k,l) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on the value of capital today k and labor l
     # Multivariate optimization of the objective function for each capital level in the grid
     # Steady state
@@ -255,14 +313,17 @@ function T_mvariate_max(M::Model)
     # Initialization
     #V_new = zeros(n_k)
     kp_max = 0.0
+    # Quadratic loss penalty
+    a = 5.0
     # Maximize
     for i in 1:n_k
-        kp_max = min(get_kp_max(k_grid[i],1.0),0.9999*k_grid[end])
+        #kp_max = min(get_kp_max(k_grid[i],1.0),0.9999*k_grid[end])
+        kp_max = min(get_kp_max(k_grid[i],1.0),k_grid[end])
         # Initial values
         init_val = [(kp_min+kp_max)/2,l_ss]
         inner_optimizer = NelderMead()
-        min_result = optimize(x->Obj_fn(k_grid[i],x,p),[kp_min,l_min],[kp_max,l_max],init_val,Fminbox(inner_optimizer))
-        # Check result
+        min_result = optimize(x->Obj_fn(k_grid[i],x[1],x[2],a,p),[kp_min,l_min],[kp_max,l_max],init_val,Fminbox(inner_optimizer))
+        # Check resultHi
         #converged(min_result) || error("Failed to solve Bellman max for capital =" k_grid[i]" in $(iterations(min_result)) iterations")
         # Record results
         V[i] = -min_result.minimum
@@ -279,31 +340,66 @@ function T_univariate_max(M::Model)
     @unpack p, n_k, k_grid, V, G_kp, G_c, G_l = M
     @unpack β,α,z,δ,η,σ,c_min = p
     # Interpolate current iteration of value function v(k') so I can evaluate it at any k'
-    Vp = ScaledInterpolations(k_grid,V, FritschButlandMonotonicInterpolation()) # Impose monotonicity because I know it is increasing in capital
+    Vp = ScaledInterpolations(k_grid,V, BSpline(Cubic(Line(OnGrid())))) # Impose monotonicity because I know it is increasing in capital
+    # Define derivative of value function wrt capital k'
+    dVp(x) = ForwardDiff.derivative(Vp,x)
+    # Define function that returns objective function for a given triple (k,k',l)
+    Obj_fn(k,kp,l,p::Par) = -utility_unr(k,kp,l,p) - β*Vp.(kp)
+    # Derivative of objective function wrt capital k'
+    d_Obj_fn_kp(k,kp,l,p::Par) = d_utility_kp(k,kp,l,p) + β*dVp.(kp)
+    # Derivative of objective function wrt labor l
+    d_Obj_fn_l(k,kp,l,p::Par) = d_utility_l(k,kp,l,p)
     # Define boundaries on capital tomorrow k' and on labor l
     l_min = 1E-16
     l_max = 1.0
     get_kp_max(k,l) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on the value of capital today k and labor l
-    # Define function that finds optimal labor l given (k,k') and returns objective function
-    function Obj_fn(k,kp,p::Par)
-        min_result = optimize(x->d_utility_l(k,kp,x,p).^2,l_min,l_max,Brent())
-        l = min_result.minimizer
-        return -utility(k,kp,l,p) - β*Vp.(kp),l
+    # Define function that finds optimal labor l given (k,k') and returns objective function conditional on optimal labor
+    function Obj_fn_condl(k,kp,p::Par)
+        # Check for corner solutions
+        dobj_min = d_utility_l(k,kp,l_min,p)
+        dobj_max = d_utility_l(k,kp,l_max,p)
+        if dobj_min <= 0
+            return -utility_unr(k,kp,l_min,p) - β*Vp.(kp),l_min
+        elseif dobj_max >= 0
+            return -utility_unr(k,kp,l_max,p) - β*Vp.(kp),l_max
+        else
+        # if no corner solutions, find interior solution
+            min_result = optimize(x->d_utility_l(k,kp,x,p).^2,l_min,l_max,GoldenSection())
+            l = min_result.minimizer
+            return -utility_unr(k,kp,l,p) - β*Vp.(kp),l
+        end
     end
     # optimization of the objective function for each capital level in the grid
     # Initialization
-    #V_new = zeros(n_k)
-    kp_min = 0.0001
+    #min = 0.0001
+    kp_min = 1.001*k_grid[1]
     # Maximize
     for i in 1:n_k
-        kp_max = min(get_kp_max(k_grid[i],1.0),0.9999*k_grid[end])
-        min_result = optimize(x->Obj_fn(k_grid[i],x,p)[1],kp_min,kp_max,Brent())
-        # Check result
-        #converged(min_result) || error("Failed to solve Bellman max for capital =" k_grid[i]" in $(iterations(min_result)) iterations")
-        # Record results
-        V[i] = -min_result.minimum
-        G_kp[i] = min_result.minimizer
-        G_l[i] = Obj_fn(k_grid[i],G_kp[i],p::Par)[2]
+        #kp_max = min(get_kp_max(k_grid[i],1.0),0.9999*k_grid[end])
+        kp_max = min(get_kp_max(k_grid[i],1.0),k_grid[end])
+        # Check for corner solutions
+        l_kp_min = Obj_fn_condl(k_grid[i],kp_min,p)[2]
+        l_kp_max = Obj_fn_condl(k_grid[i],kp_max,p)[2]
+        dobj_min = d_Obj_fn_kp(k_grid[i],kp_min,l_kp_min,p)
+        dobj_max = d_Obj_fn_kp(k_grid[i],kp_max,l_kp_max,p)
+        if dobj_min <= 0.0
+            G_kp[i] = kp_min
+            G_l[i] = l_kp_min
+            V[i] = -Obj_fn(k_grid[i],kp_min,l_kp_min,p)
+        elseif dobj_max >= 0.0
+            G_kp[i] = kp_max
+            G_l[i] = l_kp_max
+            V[i] = -Obj_fn(k_grid[i],kp_max,l_kp_max,p)
+        else
+        # If no corner solution, find interior solution
+            min_result = optimize(x->Obj_fn_condl(k_grid[i],x,p)[1],kp_min,kp_max,Brent())
+            # Check result
+            #converged(min_result) || error("Failed to solve Bellman max for capital =" k_grid[i]" in $(iterations(min_result)) iterations")
+            # Record results
+            V[i] = -min_result.minimum
+            G_kp[i] = min_result.minimizer
+            G_l[i] = Obj_fn_condl(k_grid[i],G_kp[i],p)[2]
+        end
     end
     # Fill in policy for consumption
     G_c = z.*(collect(k_grid).^α).*(G_l.^(1-α)) .- G_kp
@@ -319,3 +415,9 @@ end
 # b) Curved spaced grid with univariate optimization
 @time M_20c  = VFI_fixedpoint(T_univariate_max,Model(n_k=20,θ_k=3.6))
      VFI_Graphs(M_20c,"univariate_max")
+
+
+# Optimization test
+f(x,y) = (1.0 - x)^2 + 100.0 * (y - x^2)^2
+x0 = [0.0,0.0]
+optimize(x->f(x[1],x[2]),x0)
