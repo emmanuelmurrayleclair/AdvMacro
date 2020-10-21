@@ -17,7 +17,7 @@ include("Scaled_Interpolation_Functions.jl")
 # Set seed
 Random.seed!(420)
 
-# Paramters
+# Parameters
     # Generate structure for parameters using Parameters module
     # Set default values for parameters
     @with_kw struct Par
@@ -27,8 +27,8 @@ Random.seed!(420)
         β::Float64 = 0.98 ; # Discount factor
         σ::Float64 = 2 ; # consumption elasticity of subsitution
         η::Float64 = 1 ; # labor/leisure elasticity of substitution
-        δ::Float64 = 0.05 ; # Depreciation rate of capital
-        ρ::Float64 = 0.9 ; # Persistance of AR(1) productivity process: log(z')=ρlog(z)+η
+        δ::Float64 = 0.1 ; # Depreciation rate of capital
+        ρ::Float64 = 0.8 ; # Persistance of AR(1) productivity process: log(z')=ρlog(z)+η
         σ_η::Float64 = 0.1 ; # Variance of innovations for productivity where η ∼ N(0,σ_η)
         # VFI Paramters
         max_iter::Int64   = 2000  ; # Maximum number of iterations
@@ -197,144 +197,193 @@ end
     end
     M = Model()
 
-    # Function that finds the fixed point of the value function, then interpolates between grid points
-    function VFI_fixedpoint(T::Function,M::Model)
-                ### T : Bellman operator (interior loop) ###
-                ### M : Model structure                  ###
-        # Unpack model structure
-        @unpack p,n_k,n_k_fine,θ_k,k_grid,k_grid_fine,n_z,V_fine,G_kp_fine,G_c_fine,G_l_fine,Euler,z_grid,Π = M
-        # VFI paramters
-        @unpack max_iter, dist_tol = p
-        # Initialize variables for iteration
-        V_old = zeros(n_k,n_z) # Value function
-        V_dist = 1 # Distance between old and new value function
-        iter = 1
-        println(" ")
-        println("------------------------")
-        println("VFI - n_k=$n_k - grid curvature θ_k=$θ_k - n_z=$n_z")
-        # Start VFI
-        while iter <= max_iter
-            # Update value function and policy functions
-            V_new, G_kp, G_c, G_l = T(Model(M,V=copy(V_old))) # Call Bellman operator which returns a new value function at each capital grid point
-            # Update value function and distance between previous and current iteration
-            V_dist = maximum(abs.(V_new./V_old.-1))
-            V_old = V_new
-            # Report progress
-            println("   VFI Loop: iter=$iter, dist=",100*V_dist," %")
-            # Report progress every 100 iterations
-            #if mod(iter,100)==0
-            #    println("   VFI Loop: iter=$iter, dist=",100*V_dist,"%")
-            #end
-            # Check if converged
-            if V_dist <= dist_tol
-                println("VFI - n_k=$n_k - θ_k=$θ_k")
-                println("Converged after $iter iterations with a distance of ",100*V_dist," %")
-                println("------------------------")
-                println(" ")
-                # Interpolate to fine grid on capital using natural cubic spline if it converged
-                for i in 1:n_z
-                    V_ip = ScaledInterpolations(M.k_grid,V_new[:,i], FritschButlandMonotonicInterpolation()) # Monotonic spline because I know that the value function is always increasing in capital
-                        V_fine[:,i] = V_ip.(collect(M.k_grid_fine))
-                    G_kp_ip = ScaledInterpolations(M.k_grid,G_kp[:,i], BSpline(Cubic(Line(OnGrid()))))
-                        G_kp_fine[:,i] = G_kp_ip.(collect(M.k_grid_fine))
-                    G_c_ip = ScaledInterpolations(M.k_grid,G_c[:,i], BSpline(Cubic(Line(OnGrid()))))
-                        G_c_fine[:,i] = G_c_ip.(collect(M.k_grid_fine))
-                    G_l_ip = ScaledInterpolations(M.k_grid,G_l[:,i], BSpline(Cubic(Line(OnGrid()))))
-                        G_l_fine[:,i] = G_l_ip.(collect(M.k_grid_fine))
-                    # Percent Euler Error on fine grid
-                    #Euler[:,i] = Euler_Error(M.k_grid_fine,G_kp_fine,G_kp_ip.(collect(G_kp_fine)),G_l_fine,G_l_ip.(collect(G_kp_fine)),p)
-                end
-                # Update model with solution
-                M = Model(M; V=V_new,G_kp=G_kp,G_c=G_c,G_l=G_l,V_fine=V_fine,G_kp_fine=G_kp_fine,G_c_fine=G_c_fine,G_l_fine=G_l_fine,Euler=Euler)
-                return M
-            end
-            # If it didn't converge, go to next iteration
-            iter += 1
-        end
-        # If it didn't converge, return error
-        error("Error in VFI - Solution not found")
-    end
+# Graphs
+function VFI_Graphs(M::Model,VFI_Type)
+    gr()
+    # Value Function
+        plot(M.k_grid,M.V,linetype=:scatter,marker=(:diamond,4),markercolor=RGB(0.5,0.1,0.1),label="VFI - n_k=$(M.n_k) - θ_k=$(M.θ_k)")
+        plot!(M.k_grid_fine,M.V_fine,linewidth=2.5,linestyle=(:dash),linecolor=RGB(0.4,0.4,0.4),label=nothing)
+        xlabel!("Capital")
+        ylabel!("Value")
+        savefig("./Figures/VFI_"*VFI_Type*"_V_$(M.n_k)_$(M.θ_k).pdf")
+    # Capital Policy Function
+        plot(M.k_grid_fine,M.k_grid_fine,lw=1,linecolor=RGB(0.6,0.6,0.6),label=nothing)
+        plot!(M.k_grid,M.G_kp,linetype=:scatter,marker=(:diamond,4),markercolor=RGB(0.5,0.1,0.1),label="VFI - n_k=$(M.n_k) - θ_k=$(M.θ_k)")
+        plot!(M.k_grid_fine,M.G_kp_fine,linewidth=2.5,linestyle=(:dash),linecolor=RGB(0.4,0.4,0.4),label=nothing)
+        xlabel!("Capital")
+        ylabel!("Capital")
+        savefig("./Figures/VFI_"*VFI_Type*"_G_kp_$(M.n_k)_$(M.θ_k).pdf")
+    # Labor Policy Function
+        plot(M.k_grid_fine,M.k_grid_fine,lw=1,linecolor=RGB(0.6,0.6,0.6),label=nothing)
+        plot!(M.k_grid,M.G_l,linetype=:scatter,marker=(:diamond,4),markercolor=RGB(0.5,0.1,0.1),label="VFI - n_k=$(M.n_k) - θ_k=$(M.θ_k)")
+        plot!(M.k_grid_fine,M.G_l_fine,linewidth=2.5,linestyle=(:dash),linecolor=RGB(0.4,0.4,0.4),label=nothing)
+        xlabel!("Capital")
+        ylabel!("labor")
+        savefig("./Figures/VFI_"*VFI_Type*"_G_l_$(M.n_k)_$(M.θ_k).pdf")
+    # Euler Percentage Error
+        plot(M.k_grid_fine,zeros(M.n_k_fine),lw=1,linecolor=RGB(0.6,0.6,0.6),label=nothing,title = "Euler Equation Error (%)",legend=(0.75,0.2),foreground_color_legend = nothing,background_color_legend = nothing)
+        plot!(M.k_grid_fine,M.Euler,linetype=:scatter,marker=(:diamond,2),linecolor=RGB(0.5,0.1,0.1),label="VFI - n_k=$(M.n_k) - θ_k=$(M.θ_k)")
+        xlabel!("Capital")
+        ylabel!("Percentage Points")
+        savefig("./Figures/VFI_"*VFI_Type*"_Euler_$(M.n_k)_$(M.θ_k).pdf")
+        println("\n     Graphs Completed for VFI_$VFI_Type - n_k=$(M.n_k) - θ_k=$(M.θ_k)\n")
+end
 
-    # Bellman operator for the nested continuous choice of labor and capital tomorrow with capital and productivity as state variables
-    function T_nested_max(M::Model)
-        @unpack p,n_k,k_grid,n_z,V,G_kp,G_c,G_l,z_grid,Π,z_grid = M
-        @unpack β,α,δ,η,σ,c_min = p
-        get_kp_max(k,l) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on the value of capital today k and labor l
-        # Define boundaries on labor l
-        l_min = 1E-16
-        l_max = 1.0
-        # Define boundaries for k'
-        kp_min = k_grid[1]
-        get_kp_max(k,l,z) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on (k,l,z)
-        # Function to get V_old
-        Vp = [x->ScaledInterpolations(k_grid,x[:,i], BSpline(Cubic(Line(OnGrid())))) for i in 1:n_z]
-        # Function that returns objective function for a given (z,k,k',l)
-        function Obj_fn(k,z,kp,l,Π_z::Vector,p::Par)
-            # Π_z: Vector of conditional probabilites for productivity next period given z today
-            Emax = sum(Π_z[x]*Vp[x](V).(kp) for x in 1:n_z) # sum of z_j probability when starting at z_i : ∑_j π_ij V(kp,z_j)
-            return -utility(k,z,kp,l,p) - β*Emax
+# Function that finds the fixed point of the value function, then interpolates between grid points
+function VFI_fixedpoint(T::Function,M::Model)
+            ### T : Bellman operator (interior loop) ###
+            ### M : Model structure                  ###
+    # Unpack model structure
+    @unpack p,n_k,n_k_fine,θ_k,k_grid,k_grid_fine,n_z,V_fine,G_kp_fine,G_c_fine,G_l_fine,Euler,z_grid,Π = M
+    # VFI paramters
+    @unpack max_iter, dist_tol = p
+    # Initialize variables for iteration
+    V_old = zeros(n_k,n_z) # Value function
+    V_dist = 1 # Distance between old and new value function
+    iter = 1
+    println(" ")
+    println("------------------------")
+    println("VFI - n_k=$n_k - grid curvature θ_k=$θ_k - n_z=$n_z")
+    # Start VFI
+    while iter <= max_iter
+        # Update value function and policy functions
+        a=1.0
+        V_new = a*T(Model(M,V=copy(V_old)))[1] + (1-a)*V_old # Call Bellman operator which returns a new value function at each capital grid point
+        # Update value function and distance between previous and current iteration
+        V_dist = maximum(abs.(V_new./V_old.-1))
+        V_old = V_new
+        # Report progress
+        println("   VFI Loop: iter=$iter, dist=",100*V_dist," %")
+        # Report progress every 100 iterations
+        #if mod(iter,100)==0
+        #    println("   VFI Loop: iter=$iter, dist=",100*V_dist,"%")
+        #end
+        # Check if converged
+        if V_dist <= dist_tol
+            V_new, G_kp, G_c, G_l = T(Model(M,V=copy(V_new)))
+            println("VFI - n_k=$n_k - θ_k=$θ_k")
+            println("Converged after $iter iterations with a distance of ",100*V_dist," %")
+            println("------------------------")
+            println(" ")
+            # Interpolate to fine grid on capital using natural cubic spline if it converged
+            for i in 1:n_z
+                V_ip = ScaledInterpolations(M.k_grid,V_new[:,i], FritschButlandMonotonicInterpolation()) # Monotonic spline because I know that the value function is always increasing in capital
+                    V_fine[:,i] = V_ip.(collect(M.k_grid_fine))
+                G_kp_ip = ScaledInterpolations(M.k_grid,G_kp[:,i], BSpline(Cubic(Line(OnGrid()))))
+                    G_kp_fine[:,i] = G_kp_ip.(collect(M.k_grid_fine))
+                G_c_ip = ScaledInterpolations(M.k_grid,G_c[:,i], BSpline(Cubic(Line(OnGrid()))))
+                    G_c_fine[:,i] = G_c_ip.(collect(M.k_grid_fine))
+                G_l_ip = ScaledInterpolations(M.k_grid,G_l[:,i], BSpline(Cubic(Line(OnGrid()))))
+                    G_l_fine[:,i] = G_l_ip.(collect(M.k_grid_fine))
+                # Percent Euler Error on fine grid
+                #Euler[:,i] = Euler_Error(M.k_grid_fine,G_kp_fine,G_kp_ip.(collect(G_kp_fine)),G_l_fine,G_l_ip.(collect(G_kp_fine)),p)
+            end
+            # Update model with solution
+            M = Model(M; V=V_new,G_kp=G_kp,G_c=G_c,G_l=G_l,V_fine=V_fine,G_kp_fine=G_kp_fine,G_c_fine=G_c_fine,G_l_fine=G_l_fine,Euler=Euler)
+            return M
         end
-        # Function to get derivative of Emax wrt capital k'
-        dVp(x,Π_z::Vector) = sum(Π_z[i]*ForwardDiff.derivative(Vp[i](V),x) for i in 1:n_z)
-        # Function that returns derivative of objective function wrt k'
-        d_Obj_fn_kp(k,z,kp,l,Π_z::Vector,p::Par) = d_utility_kp(k,z,kp,l,p) + β*dVp(kp,Π_z)
-        # Derivative of objective function wrt labor l
-        d_Obj_fn_l(k,z,kp,l,p::Par) = d_utility_l(k,z,kp,l,p)
-        # Define function that finds optimal labor l given (k,z,k') and returns objective function conditional on optimal labor
-        function Obj_fn_condl(k,z,kp,Π_z::Vector,p::Par)
-            # Check for corner solutions on labor
-            dobj_min = d_utility_l(k,z,kp,l_min,p)
-            dobj_max = d_utility_l(k,z,kp,l_max,p)
-            if dobj_min <= 0
-                return -Obj_fn(k,z,kp,l_min,Π_z,p),l_min
-            elseif dobj_max >= 0
-                return -Obj_fn(k,z,kp,l_max,Π_z,p),l_max
+        # If it didn't converge, go to next iteration
+        iter += 1
+    end
+    # If it didn't converge, return error
+    error("Error in VFI - Solution not found")
+end
+
+# Bellman operator for the nested continuous choice of labor and capital tomorrow with capital and productivity as state variables
+function T_nested_max(M::Model)
+    @unpack p,n_k,k_grid,n_z,V,G_kp,G_c,G_l,z_grid,Π,z_grid = M
+    @unpack β,α,δ,η,σ,c_min = p
+    get_kp_max(k,l) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on the value of capital today k and labor l
+    # Define boundaries on labor l
+    l_min = 1E-16
+    l_max = 1.0
+    # Define boundaries for k'
+    kp_min = 1.001*k_grid[1]
+    get_kp_max(k,l,z) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on (k,l,z)
+    # Function to get V_old
+    Vp = [x->ScaledInterpolations(k_grid,x[:,i], BSpline(Cubic(Line(OnGrid())))) for i in 1:n_z]
+    # Function that returns objective function for a given (z,k,k',l)
+    function Obj_fn(k,z,kp,l,Π_z::Vector,p::Par)
+        # Π_z: Vector of conditional probabilites for productivity next period given z today
+        Emax = sum(Π_z[x]*Vp[x](V).(kp) for x in 1:n_z) # sum of z_j probability when starting at z_i : ∑_j π_ij V(kp,z_j)
+        return -utility(k,z,kp,l,p) - β*Emax
+    end
+    # Function to get derivative of Emax wrt capital k'
+    dVp(x,Π_z::Vector) = sum(Π_z[i]*ForwardDiff.derivative(Vp[i](V),x) for i in 1:n_z)
+    # Function that returns derivative of objective function wrt k'
+    d_Obj_fn_kp(k,z,kp,l,Π_z::Vector,p::Par) = d_utility_kp(k,z,kp,l,p) + β*dVp(kp,Π_z)
+    # Derivative of objective function wrt labor l
+    d_Obj_fn_l(k,z,kp,l,p::Par) = d_utility_l(k,z,kp,l,p)
+    # Define function that finds optimal labor l given (k,z,k') and returns objective function conditional on optimal labor
+    function Obj_fn_condl(k,z,kp,Π_z::Vector,p::Par)
+        # Check for corner solutions on labor
+        dobj_min = d_utility_l(k,z,kp,l_min,p)
+        dobj_max = d_utility_l(k,z,kp,l_max,p)
+        if dobj_min <= 0
+            return Obj_fn(k,z,kp,l_min,Π_z,p),l_min
+        elseif dobj_max >= 0
+            return Obj_fn(k,z,kp,l_max,Π_z,p),l_max
+        else
+        # if no corner solutions, find interior solution
+            min_result = optimize(x->d_utility_l(k,z,kp,x,p).^2,l_min,l_max,Brent())
+            l = min_result.minimizer
+            return Obj_fn(k,z,kp,l,Π_z,p),l
+        end
+    end
+    # Outer loop for all possible values of productivity today
+    for j in 1:n_z
+        # Inner loop for each capital level in the grid
+        for i in 1:n_k
+            kp_max = min(get_kp_max(k_grid[i],1.0,z_grid[j]),k_grid[end])
+            # Check for corner solutions on capital
+            l_kp_min = Obj_fn_condl(k_grid[i],z_grid[j],kp_min,Π[j,:],p)[2]
+            l_kp_max = Obj_fn_condl(k_grid[i],z_grid[j],kp_max,Π[j,:],p)[2]
+            dobj_min = d_Obj_fn_kp(k_grid[i],z_grid[j],kp_min,l_kp_min,Π[j,:],p)
+            dobj_max = d_Obj_fn_kp(k_grid[i],z_grid[j],kp_max,l_kp_max,Π[j,:],p)
+            if dobj_min <= 0.0
+                G_kp[i,j] = kp_min
+                G_l[i,j] = l_kp_min
+                V[i,j] = -Obj_fn(k_grid[i],z_grid[j],kp_min,l_kp_min,Π[j,:],p)
+            elseif dobj_max >= 0.0
+                G_kp[i,j] = kp_max
+                G_l[i,j] = l_kp_max
+                V[i,j] = -Obj_fn(k_grid[i],z_grid[j],kp_max,l_kp_max,Π[j,:],p)
             else
-            # if no corner solutions, find interior solution
-                min_result = optimize(x->d_utility_l(k,z,kp,x,p).^2,l_min,l_max,Brent())
-                l = min_result.minimizer
-                return -Obj_fn(k,z,kp,l,Π_z,p),l
+            # If no corner solution, find interior solution
+                min_result = optimize(x->Obj_fn_condl(k_grid[i],z_grid[j],x,Π[j,:],p)[1],kp_min,kp_max,Brent())
+                # Check result
+                #converged(min_result) || error("Failed to solve Bellman max for capital =" k_grid[i]" in $(iterations(min_result)) iterations")
+                # Record results
+                V[i,j] = -min_result.minimum
+                G_kp[i,j] = min_result.minimizer
+                G_l[i,j] = Obj_fn_condl(k_grid[i],z_grid[j],G_kp[i],Π[j,:],p)[2]
             end
         end
-        # Outer loop for all possible values of productivity today
-        for j in 1:n_z
-            # Inner loop for each capital level in the grid
-            for i in 1:n_k
-                #kp_max = min(get_kp_max(k_grid[i],1.0),0.9999*k_grid[end])
-                kp_max = min(get_kp_max(k_grid[i],1.0,z_grid[j]),k_grid[end])
-                # Check for corner solutions on capital
-                l_kp_min = Obj_fn_condl(k_grid[i],z_grid[j],kp_min,Π[j,:],p)[2]
-                l_kp_max = Obj_fn_condl(k_grid[i],z_grid[j],kp_max,Π[j,:],p)[2]
-                dobj_min = d_Obj_fn_kp(k_grid[i],z_grid[j],kp_min,l_kp_min,Π[j,:],p)
-                dobj_max = d_Obj_fn_kp(k_grid[i],z_grid[j],kp_max,l_kp_max,Π[j,:],p)
-                if dobj_min <= 0.0
-                    G_kp[i,j] = kp_min
-                    G_l[i,j] = l_kp_min
-                    V[i,j] = -Obj_fn(k_grid[i],z_grid[j],kp_min,l_kp_min,Π[j,:],p)
-                elseif dobj_max >= 0.0
-                    G_kp[i,j] = kp_max
-                    G_l[i,j] = l_kp_max
-                    V[i,j] = -Obj_fn(k_grid[i],z_grid[j],kp_max,l_kp_max,Π[j,:],p)
-                else
-                # If no corner solution, find interior solution
-                    min_result = optimize(x->Obj_fn_condl(k_grid[i],z_grid[j],x,Π[j,:],p)[1],kp_min,kp_max,Brent())
-                    # Check result
-                    #converged(min_result) || error("Failed to solve Bellman max for capital =" k_grid[i]" in $(iterations(min_result)) iterations")
-                    # Record results
-                    V[i,j] = -min_result.minimum
-                    G_kp[i,j] = min_result.minimizer
-                    G_l[i,j] = Obj_fn_condl(k_grid[i],z_grid[j],G_kp[i],Π[j,:],p)[2]
-                end
-            end
-            # Fill in policy for consumption
-            G_c[:,j] = z_grid[j].*(collect(k_grid).^α).*(G_l[:,j].^(1-α)) .- G_kp[:,j]
-        end
-        # Return results
-        return V, G_kp, G_c, G_l
+        # Fill in policy for consumption
+        G_c[:,j] = z_grid[j].*(collect(k_grid).^α).*(G_l[:,j].^(1-α)) .- G_kp[:,j]
     end
+    # Return results
+    return V, G_kp, G_c, G_l
+end
 
-                ### Solve the problem for θ_k=3.6,n_z=10,n_k=20 ###
+                ### Solve the problem for θ_k=2,n_z=10,n_k=20 ###
 # Get discrete grid for productivity and transition matrix
 (log_z,Π) = Rouwenhorst95(10,p)[1:2]
 z = exp.(log_z)
-@time Mc  = VFI_fixedpoint(T_nested_max,Model(n_k=20,θ_k=1,n_z=5,z_grid=z,Π=Π))
+# Get solution
+@time Mc  = VFI_fixedpoint(T_nested_max,Model(n_k=20,θ_k=2,n_z=10,z_grid=z,Π=Π))
+# Interpolate the value function along the z dimension for 3d plot
+z_grid = range(z[1],z[end],length=size(z)[1])
+z_grid_fine = range(z[1],z[end],length=Mc.n_k_fine)
+V_fine_3d = zeros(Mc.n_k_fine,Mc.n_k_fine)
+V_fine_33d = [ScaledInterpolations(z_grid,Mc.V_fine[i,:], BSpline(Cubic(Line(OnGrid())))).(collect(z_grid_fine)) for i in 1:Mc.n_k_fine]
+for i in 1:Mc.n_k_fine
+    V_fine_3d[i,:] = V_fine_33d[i]
+end
+# Surface and contour plot of the value function
+gr()
+x= Mc.k_grid_fine; y=z_grid_fine; f=V_fine_3d;
+plot(x,y,f, st=:surface,xlabel="capital",ylabel="productivity") # Surface plot
+savefig("./Figures/surface_vf.pdf")
+plot(x,y,f, st=:contour,xlabel="capital",ylabel="productivity",nlevels=100, width=2, size=[800,480]) # Contour plot
+savefig("./Figures/contour_vf.pdf")
