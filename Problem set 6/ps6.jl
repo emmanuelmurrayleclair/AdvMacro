@@ -13,7 +13,6 @@ using Optim
 using Roots
 include("Scaled_Interpolation_Functions.jl")
 
-
 # Set seed
 Random.seed!(420)
 
@@ -27,8 +26,8 @@ Random.seed!(420)
         β::Float64 = 0.98 ; # Discount factor
         σ::Float64 = 2 ; # consumption elasticity of subsitution
         η::Float64 = 1 ; # labor/leisure elasticity of substitution
-        δ::Float64 = 0.1 ; # Depreciation rate of capital
-        ρ::Float64 = 0.8 ; # Persistance of AR(1) productivity process: log(z')=ρlog(z)+η
+        δ::Float64 = 0.05 ; # Depreciation rate of capital
+        ρ::Float64 = 0.9 ; # Persistance of AR(1) productivity process: log(z')=ρlog(z)+η
         σ_η::Float64 = 0.1 ; # Variance of innovations for productivity where η ∼ N(0,σ_η)
         # VFI Paramters
         max_iter::Int64   = 2000  ; # Maximum number of iterations
@@ -106,15 +105,11 @@ function utility(k,z,kp,l,p::Par)
     @unpack α,δ,σ,η,c_min = p
     u_c = 0; # intialize utility from consumption
     # Utility of consumption
-    c = z*(k^α)*(l^(1-α))+(1-δ)*k-kp # Consumption from resource constraint
-    if c<=c_min
-        u_c = (c_min^(1-σ))/(1-σ)
-    else
-        u_c = (c^(1-σ))/(1-σ)
-    end
+    c = max(z.*(k.^α)*(l.^(1-α)).+(1-δ).*k.-kp,c_min) # Consumption from resource constraint
+    u_c = (c.^(1-σ))./(1-σ)
     # Disutility of labor
-    u_l = χ*((l^(1+η))/(1+η))
-    return u_c-u_l
+    u_l = χ.*((l.^(1+η))./(1+η))
+    return u_c.-u_l
 end
 # Derivative of utility function wrt labor l
 function d_utility_l(k,z,kp,l,p::Par)
@@ -206,7 +201,10 @@ function VFI_fixedpoint(T::Function,M::Model)
     # VFI paramters
     @unpack max_iter, dist_tol = p
     # Initialize variables for iteration
-    V_old = zeros(n_k,n_z) # Value function
+    V_old = zeros(n_k,n_z) # Value function with no savings
+    for i in 1:n_z
+        V_old[:,i] = map(x->utility(x,z_grid[i],0.0,l_ss,p),collect(k_grid))
+    end
     V_dist = 1 # Distance between old and new value function
     iter = 1
     println(" ")
@@ -258,26 +256,64 @@ function VFI_fixedpoint(T::Function,M::Model)
 end
 
 # Bellman operator for the nested continuous choice of labor and capital tomorrow with capital and productivity as state variables
-function T_nested_max(M::Model)
+function T_EGM(M::Model)
     @unpack p,n_k,k_grid,n_z,V,G_kp,G_c,G_l,z_grid,Π,z_grid = M
     @unpack β,α,δ,η,σ,c_min = p
-    get_kp_max(k,l) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on the value of capital today k and labor l
-    # Define boundaries on labor l
+    # Emax
+    Emax = (β*Π*V')'
+    # Interpolating Emax to take derivative
+    Emax_ip = [x->ScaledInterpolations(k_grid,x[:,i], FritschButlandMonotonicInterpolation()) for i in 1:n_z]
+    # Derivative of Emax
+    dEmax(x,ind) = ForwardDiff.derivative(Emax_ip[ind](Emax),x)
+    # Function that returns consumption ̃c(k',z) that solves k' FOC
+    function ctilde(kp,ind)
+        if dEmax(kp,ind) <= 0.0
+            return c_min
+        else
+            return dEmax(kp,ind)^(-1/σ)
+        end
+    end
+    #ctilde(kp,ind) = (dEmax(kp,ind))^(-1/σ)
+    # Function that returns capital today k that satisfy labor l FOC
+    ktilde(c,l,z) = (χ*(l^(η+α))/(z*(c^(-σ))*(1-α)))^(1/α)
+    # Function that returns endogenous resource constraint to solve for labor numerically
+    res_cons(l,c,z,kp) = z*(ktilde(c,l,z)^α)*(l^(1-α)) + (1-δ)*ktilde(c,l,z)-kp-c
+    # Boundaries for labor
     l_min = 1E-16
     l_max = 1.0
-    # Define boundaries for k'
-    kp_min = 1.001*k_grid[1]
+    G_k = zeros(n_k,n_z)
+    # Outer loop for grid of productivity today z
+    for i in 1:n_z
+        # Inner loop for grid of capital tomorrow k'
+        for j in 1:n_k
+            # Get consumption needed to satisfy k' FOC
+            G_c[j,i] = ctilde(k_grid[j],i)
+            # Find labor that satisfies the resource constraint
+            min_result = optimize(x->res_cons(x,G_c[j,i],z_grid[i],k_grid[j]).^2,l_min,l_max,Brent())
+            G_l[j,i] = min_result.minimizer
+            # use optimal labor to find optimal capital today
+            G_k[j,i] = ktilde(G_c[j,i],G_l[j,i],z_grid[i])
+            # Update value function
+            V[j,i] = utility(G_k[j,i],z_grid[i],k_grid[j],G_l[j,i],p) + Emax[j,i]
+        end
+        # Sort endogenous grid
+        sort_id = sortperm(G_k[:,i])
+        G_k[:,i] = G_k[:,i][sort_id]
+        G_l[:,i] = G_l[:,i][sort_id]
+        G_c[:,i] = G_c[:,i][sort_id]
+        V[:,i] = V[:,i][sort_id]
+    end
+
+            ### FUNCTIONS USED FOR MANUAL OPTIMIZATION IF CAPITAL IS OUT OF BOUNDS ###
+    # Boundaries on capital
     get_kp_max(k,l,z) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on (k,l,z)
-    # Function to get V_old
-    Vp = [x->ScaledInterpolations(k_grid,x[:,i], BSpline(Cubic(Line(OnGrid())))) for i in 1:n_z]
+    kp_min = 1.001*k_grid[1]
     # Function that returns objective function for a given (z,k,k',l)
     function Obj_fn(k,z,kp,l,Π_z::Vector,p::Par)
         # Π_z: Vector of conditional probabilites for productivity next period given z today
         Emax = sum(Π_z[x]*Vp[x](V).(kp) for x in 1:n_z) # sum of z_j probability when starting at z_i : ∑_j π_ij V(kp,z_j)
         return -utility(k,z,kp,l,p) - β*Emax
     end
-    # Function to get derivative of Emax wrt capital k'
-    dVp(x,Π_z::Vector) = sum(Π_z[i]*ForwardDiff.derivative(Vp[i](V),x) for i in 1:n_z)
     # Function that returns derivative of objective function wrt k'
     d_Obj_fn_kp(k,z,kp,l,Π_z::Vector,p::Par) = d_utility_kp(k,z,kp,l,p) + β*dVp(kp,Π_z)
     # Derivative of objective function wrt labor l
@@ -298,48 +334,67 @@ function T_nested_max(M::Model)
             return Obj_fn(k,z,kp,l,Π_z,p),l
         end
     end
-    # Outer loop for all possible values of productivity today
-    for j in 1:n_z
-        # Inner loop for each capital level in the grid
-        for i in 1:n_k
-            kp_max = min(get_kp_max(k_grid[i],1.0,z_grid[j]),k_grid[end])
-            # Check for corner solutions on capital
-            l_kp_min = Obj_fn_condl(k_grid[i],z_grid[j],kp_min,Π[j,:],p)[2]
-            l_kp_max = Obj_fn_condl(k_grid[i],z_grid[j],kp_max,Π[j,:],p)[2]
-            dobj_min = d_Obj_fn_kp(k_grid[i],z_grid[j],kp_min,l_kp_min,Π[j,:],p)
-            dobj_max = d_Obj_fn_kp(k_grid[i],z_grid[j],kp_max,l_kp_max,Π[j,:],p)
-            if dobj_min <= 0.0
-                G_kp[i,j] = kp_min
-                G_l[i,j] = l_kp_min
-                V[i,j] = -Obj_fn(k_grid[i],z_grid[j],kp_min,l_kp_min,Π[j,:],p)
-            elseif dobj_max >= 0.0
-                G_kp[i,j] = kp_max
-                G_l[i,j] = l_kp_max
-                V[i,j] = -Obj_fn(k_grid[i],z_grid[j],kp_max,l_kp_max,Π[j,:],p)
-            else
-            # If no corner solution, find interior solution
-                min_result = optimize(x->Obj_fn_condl(k_grid[i],z_grid[j],x,Π[j,:],p)[1],kp_min,kp_max,Brent())
-                # Check result
-                #converged(min_result) || error("Failed to solve Bellman max for capital =" k_grid[i]" in $(iterations(min_result)) iterations")
-                # Record results
-                V[i,j] = -min_result.minimum
-                G_kp[i,j] = min_result.minimizer
-                G_l[i,j] = Obj_fn_condl(k_grid[i],z_grid[j],G_kp[i],Π[j,:],p)[2]
-            end
+    # Interpolate new value function and policy functions to exogenous grid
+    V_new = zeros(n_k,n_z)
+    G_c_new = zeros(n_k,n_z)
+    G_l_new = zeros(n_k,n_z)
+    for i in 1:n_z
+        V_new[:,i] = Spline1D(G_k[:,i],V[:,i]).(collect(k_grid))
+        G_l_new[:,i] = Spline1D(G_k[:,i],G_l[:,i]).(collect(k_grid))
+        for ind = findall(<(l_min),G_l_new[:,i])
+            G_l_new[ind,i] = l_min
         end
-        # Fill in policy for consumption
-        G_c[:,j] = z_grid[j].*(collect(k_grid).^α).*(G_l[:,j].^(1-α)) .- G_kp[:,j]
+        for ind = findall(>(l_max),G_l_new[:,i])
+            G_l_new[ind,i] = l_max
+        end
+        G_c_new[:,i] = Spline1D(G_k[:,i],G_c[:,i]).(collect(k_grid))
+        for ind = findall(<(c_min),G_c_new[:,i])
+            G_c_new[ind,i] = c_min
+        end
+        #G_kp[:,i] = max(z_grid[i].*(collect(k_grid).^(α)).*(G_l_new[:,i].^(1-α)).+(1-δ).*(collect(k_grid)).-G_c_new[:,i],kp_min)
+        for j in 1:n_k
+            G_kp[j,i] = max(z_grid[i]*(k_grid[j]^(α)).*(G_l_new[j,i]^(1-α))+(1-δ)*(k_grid[j])-G_c_new[j,i],kp_min)
+        end
+        ## Manual optimization if capital is out of bounds
+        #for ind = vcat(findall(<(G_k[1,i]),collect(k_grid)),findall(>(G_k[end,i]),collect(k_grid)))
+        #    kp_max = min(get_kp_max(k_grid[ind],1.0,z_grid[i]),k_grid[end])
+        #    # Check for corner solutions on capital
+        #    l_kp_min = Obj_fn_condl(k_grid[ind],z_grid[i],kp_min,Π[i,:],p)[2]
+        #    l_kp_max = Obj_fn_condl(k_grid[ind],z_grid[i],kp_max,Π[i,:],p)[2]
+        #    dobj_min = d_Obj_fn_kp(k_grid[ind],z_grid[i],kp_min,l_kp_min,Π[i,:],p)
+        #    dobj_max = d_Obj_fn_kp(k_grid[ind],z_grid[i],kp_max,l_kp_max,Π[i,:],p)
+        #    if dobj_min <= 0.0
+        #        G_kp[ind,i] = kp_min
+        #        G_l_new[ind,i] = l_kp_min
+        #        V_new[ind,i] = -Obj_fn(k_grid[ind],z_grid[i],kp_min,l_kp_min,Π[i,:],p)
+        #    elseif dobj_max >= 0.0
+        #        G_kp[ind,i] = kp_max
+        #        G_l[ind,i] = l_kp_max
+        #        V_new[ind,i] = -Obj_fn(k_grid[ind],z_grid[i],kp_max,l_kp_max,Π[i,:],p)
+        #    else
+        #        # If no corner solution, find interior solution
+        #        min_result = optimize(x->Obj_fn_condl(k_grid[ind],z_grid[i],x,Π[i,:],p)[1],kp_min,kp_max,Brent())
+        #        # Record results
+        #        V_new[ind,i] = -min_result.minimum
+        #        G_kp[ind,i] = min_result.minimizer
+        #        G_l_new[ind,i] = Obj_fn_condl(k_grid[ind],z_grid[i],G_kp[ind,i],Π[i,:],p)[2]
+        #    end
+        #end
     end
     # Return results
+    V = V_new
+    G_l = G_l_new
+    G_c = G_c_new
     return V, G_kp, G_c, G_l
 end
+
 
                 ### Solve the problem for θ_k=2,n_z=10,n_k=20 ###
 # Get discrete grid for productivity and transition matrix
 (log_z,Π) = Rouwenhorst95(10,p)[1:2]
 z = exp.(log_z)
 # Get solution
-@time Mc  = VFI_fixedpoint(T_nested_max,Model(n_k=20,θ_k=2,n_z=10,z_grid=z,Π=Π))
+@time Mc  = VFI_fixedpoint(T_EGM,Model(n_k=50,θ_k=2,n_z=10,z_grid=z,Π=Π))
 # Interpolate the value function along the z dimension for 3d plot
 z_grid = range(z[1],z[end],length=size(z)[1])
 z_grid_fine = range(z[1],z[end],length=Mc.n_k_fine)
@@ -356,5 +411,146 @@ savefig("./Figures/surface_vf.pdf")
 plot(x,y,f, st=:contour,xlabel="capital",ylabel="productivity",nlevels=100, width=2, size=[800,480]) # Contour plot
 savefig("./Figures/contour_vf.pdf")
 
-                    ### Simulate 100 years of data ###
-# Start at
+
+            ### Some tests ###
+
+(log_z,Π) = Rouwenhorst95(10,p)[1:2]
+z = exp.(log_z)
+M = Model(n_k=50,θ_k=2,n_z=10,z_grid=z,Π=Π)
+@unpack p,n_k,k_grid,n_z,V,G_kp,G_c,G_l,z_grid,Π,z_grid = M
+@unpack β,α,δ,η,σ,c_min = p
+
+### Some tests ###
+V_old = zeros(n_k,n_z) # Value function with no savings
+for i in 1:n_z
+V_old[:,i] = map(x->utility(x,z_grid[i],0.0,l_ss,p),collect(k_grid))
+end
+
+V = V_old
+
+# Emax
+Emax_vec = (β*Π*V')'
+# Interpolating Emax to take derivative
+Emax_ip = [x->ScaledInterpolations(k_grid,x[:,i], FritschButlandMonotonicInterpolation()) for i in 1:n_z]
+# Derivative of Emax
+dEmax(x,ind) = ForwardDiff.derivative(Emax_ip[ind](Emax_vec),x)
+# Function that returns consumption ̃c(k',z) that solves k' FOC
+function ctilde(kp,ind)
+    if dEmax(kp,ind) <= 0.0
+        return c_min
+    else
+        return dEmax(kp,ind)^(-1/σ)
+    end
+end
+# Function that returns capital today k that satisfy labor l FOC
+ktilde(c,l,z) = (χ*(l^(η+α))/(z*(c^(-σ))*(1-α)))^(1/α)
+# Function that returns endogenous resource constraint to solve for labor numerically
+res_cons(l,c,z,kp) = z*(ktilde(c,l,z)^α)*(l^(1-α)) + (1-δ)*ktilde(c,l,z)-kp-c
+
+# Boundaries for labor
+l_min = 1E-16
+l_max = 1.0
+G_k = zeros(n_k,n_z)
+# Outer loop for grid of productivity today z
+for i in 1:n_z
+    # Inner loop for grid of capital tomorrow k'
+    for j in 1:n_k
+        # Get consumption needed to satisfy k' FOC
+        G_c[j,i] = ctilde(k_grid[j],i)
+        # Find labor that satisfies the resource constraint
+        min_result = optimize(x->res_cons(x,G_c[j,i],z_grid[i],k_grid[j]).^2,l_min,l_max,Brent())
+        G_l[j,i] = min_result.minimizer
+        # use optimal labor to find optimal capital today
+        G_k[j,i] = ktilde(G_c[j,i],G_l[j,i],z_grid[i])
+        # Update value function
+        V[j,i] = utility(G_k[j,i],z_grid[i],k_grid[j],G_l[j,i],p) + Emax_vec[j,i]
+    end
+    # Sort endogenous grid
+    sort_id = sortperm(G_k[:,i])
+    G_k[:,i] = G_k[:,i][sort_id]
+    G_l[:,i] = G_l[:,i][sort_id]
+    G_c[:,i] = G_c[:,i][sort_id]
+    V[:,i] = V[:,i][sort_id]
+end
+
+
+        ### FUNCTIONS USED FOR MANUAL OPTIMIZATION IF CAPITAL IS OUT OF BOUNDS ###
+# Boundaries on capital
+get_kp_max(k,l,z) = z*(k^α)*(l^(1-α)) + (1-δ)*k - c_min # Function because the max k' depends on (k,l,z)
+kp_min = 1.001*k_grid[1]
+# Function that returns objective function for a given (z,k,k',l)
+function Obj_fn(k,z,kp,l,Π_z::Vector,p::Par)
+    # Π_z: Vector of conditional probabilites for productivity next period given z today
+    Emax = sum(Π_z[x]*Vp[x](V).(kp) for x in 1:n_z) # sum of z_j probability when starting at z_i : ∑_j π_ij V(kp,z_j)
+    return -utility(k,z,kp,l,p) - β*Emax
+end
+# Function that returns derivative of objective function wrt k'
+d_Obj_fn_kp(k,z,kp,l,Π_z::Vector,p::Par) = d_utility_kp(k,z,kp,l,p) + β*dVp(kp,Π_z)
+# Derivative of objective function wrt labor l
+d_Obj_fn_l(k,z,kp,l,p::Par) = d_utility_l(k,z,kp,l,p)
+# Define function that finds optimal labor l given (k,z,k') and returns objective function conditional on optimal labor
+function Obj_fn_condl(k,z,kp,Π_z::Vector,p::Par)
+    # Check for corner solutions on labor
+    dobj_min = d_utility_l(k,z,kp,l_min,p)
+    dobj_max = d_utility_l(k,z,kp,l_max,p)
+    if dobj_min <= 0
+        return Obj_fn(k,z,kp,l_min,Π_z,p),l_min
+    elseif dobj_max >= 0
+        return Obj_fn(k,z,kp,l_max,Π_z,p),l_max
+    else
+    # if no corner solutions, find interior solution
+        min_result = optimize(x->d_utility_l(k,z,kp,x,p).^2,l_min,l_max,Brent())
+        l = min_result.minimizer
+        return Obj_fn(k,z,kp,l,Π_z,p),l
+    end
+end
+
+# Interpolate new value function and policy functions to exogenous grid
+V_new = zeros(n_k,n_z)
+G_c_new = zeros(n_k,n_z)
+G_l_new = zeros(n_k,n_z)
+for i in 1:n_z
+    V_new[:,i] = Spline1D(G_k[:,i],V[:,i]).(collect(k_grid))
+    G_l_new[:,i] = Spline1D(G_k[:,i],G_l[:,i]).(collect(k_grid))
+    for ind = findall(<(l_min),G_l_new[:,i])
+        G_l_new[ind,i] = l_min
+    end
+    for ind = findall(>(l_max),G_l_new[:,i])
+        G_l_new[ind,i] = l_max
+    end
+    G_c_new[:,i] = Spline1D(G_k[:,i],G_c[:,i]).(collect(k_grid))
+    for ind = findall(<(c_min),G_c_new[:,i])
+        G_c_new[ind,i] = c_min
+    end
+    G_kp[:,i] = z_grid[i].*(collect(k_grid).^(α)).*(G_l_new[:,i].^(1-α)).+(1-δ).*(collect(k_grid)).-G_c_new[:,i]
+    # Manual optimization if capital is out of bounds
+    for ind = vcat(findall(<(G_k[1,i]),collect(k_grid)),findall(>(G_k[end,i]),collect(k_grid)))
+        kp_max = min(get_kp_max(k_grid[ind],1.0,z_grid[i]),k_grid[end])
+        # Check for corner solutions on capital
+        l_kp_min = Obj_fn_condl(k_grid[ind],z_grid[i],kp_min,Π[i,:],p)[2]
+        l_kp_max = Obj_fn_condl(k_grid[ind],z_grid[i],kp_max,Π[i,:],p)[2]
+        dobj_min = d_Obj_fn_kp(k_grid[ind],z_grid[i],kp_min,l_kp_min,Π[i,:],p)
+        dobj_max = d_Obj_fn_kp(k_grid[ind],z_grid[i],kp_max,l_kp_max,Π[i,:],p)
+        if dobj_min <= 0.0
+            G_kp[ind,i] = kp_min
+            G_l_new[ind,i] = l_kp_min
+            V_new[ind,i] = -Obj_fn(k_grid[ind],z_grid[i],kp_min,l_kp_min,Π[i,:],p)
+        elseif dobj_max >= 0.0
+            G_kp[ind,i] = kp_max
+            G_l[ind,i] = l_kp_max
+            V_new[ind,i] = -Obj_fn(k_grid[ind],z_grid[i],kp_max,l_kp_max,Π[i,:],p)
+        else
+            # If no corner solution, find interior solution
+            min_result = optimize(x->Obj_fn_condl(k_grid[ind],z_grid[i],x,Π[i,:],p)[1],kp_min,kp_max,Brent())
+            # Record results
+            V_new[ind,i] = -min_result.minimum
+            G_kp[ind,i] = min_result.minimizer
+            G_l_new[ind,i] = Obj_fn_condl(k_grid[ind],z_grid[i],G_kp[ind,i],Π[i,:],p)[2]
+        end
+    end
+end
+# Return results
+V = V_new
+G_l = G_l_new
+G_c = G_c_new
+return V, G_kp, G_c, G_l
