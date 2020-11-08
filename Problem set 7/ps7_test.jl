@@ -13,6 +13,9 @@ using Optim
 using Roots
 include("Scaled_Interpolation_Functions.jl")
 
+# Set seed
+Random.seed!(420)
+
 # Parameters
     # Generate structure for parameters using Parameters module
     # Set default values for parameters
@@ -283,8 +286,31 @@ function RCE_fixedpoint(T::Function,M::Model)
         else
             a = 0.2
         end
+        #a=0.05 # step dampening factor between iterations
         # Call Bellman operator and get new value function and individual policy functions
         v_new,g_kp,g_l = T(Model(M,v=copy(v_old),G_kp=copy(G_kp_old),G_l=copy(G_l_old)))[1:3]
+        #iter_vf = 1
+        #v_dist_vf = 1
+        while iter_vf <= max_iter
+            v_new,g_kp,g_l = T(Model(M,v=copy(v_old),G_kp=copy(G_kp_old),G_l=copy(G_l_old)))[1:3]
+            γ = 1.0
+            v_new = γ.*v_new.+ (1.0-γ).*v_old
+            V_new = map((x,y)->V_eq(v_new,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+            v_dist_vf = maximum(V_new./V_old.-1)
+            v_old = v_new
+            V_old = V_new
+            println("   RCE inner value function Loop: iter=$iter_vf, dist=",100*v_dist_vf," %")
+            if iter <= 300
+                if v_dist_vf <= 0.001
+                    break
+                end
+            else
+                if v_dist_vf <= 0.000001
+                    break
+                end
+            end
+            iter_vf += 1
+        end
         # update Aggregate policy functions by imposing equilibrium conditions (K=k,L=l)
         G_kp_new = map((x,y)->G_kp_eq(g_kp,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
         G_l_new = map((x,y)->G_l_eq(g_l,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
