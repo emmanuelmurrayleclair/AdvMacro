@@ -100,18 +100,27 @@ function Euler_Error(k,z,kp,kpp,l,lp,p::Par)
     return real((RHS./LHS.-1).*100)
 end
 
-# Period utility function (no penalty)
+# Period utility function (planner's problem)
 function utility(k,z,kp,l,p::Par)
     @unpack α,δ,σ,η,c_min = p
-    u_c = 0; # intialize utility from consumption
+    c = max.(z.*(k.^α).*(l.^(1-α)).+(1-δ).*k.-kp,c_min) # Consumption from resource constraint
     # Utility of consumption
-    c = max(z.*(k.^α)*(l.^(1-α)).+(1-δ).*k.-kp,c_min) # Consumption from resource constraint
     u_c = (c.^(1-σ))./(1-σ)
     # Disutility of labor
     u_l = χ.*((l.^(1+η))./(1+η))
     return u_c.-u_l
 end
-# Derivative of utility function wrt labor l
+# Period utility function (from worker's problem in RCE)
+function utility_rce(k,z,kp,l,w,r,p::Par)
+    @unpack α,δ,σ,η,c_min = p
+    c = max.((1+r).*k.+ w.*l.- kp,c_min)
+    # Utility of consumption
+    u_c = (c.^(1-σ))./(1-σ)
+    # Disutility of labor
+    u_l = χ.*((l.^(1+η))./(1+η))
+    return u_c.-u_l
+end
+# Derivative of utility function wrt labor l (planner's problem)
 function d_utility_l(k,z,kp,l,p::Par)
     @unpack α,δ,σ,η,c_min = p
     c = z*(k^α)*(l^(1-α))+(1-δ)*k-kp
@@ -123,7 +132,14 @@ function d_utility_l(k,z,kp,l,p::Par)
     end
     return d_u*z*(k^α)*(1-α)*(l^(-α))-χ*(l^η)
 end
-# Derivative of utility function wrt capital k'
+# Derivative of utility function wrt labor l (from worker's problem in RCE)
+function d_utility_l_rce(k,z,kp,l,w,r,p::Par)
+    @unpack α,δ,σ,η,c_min = p
+    c = max.((1+r).*k.+ w.*l.- kp,c_min)
+    d_u = c.^(-σ)
+    return w.*d_u.- χ.*(l.^(η))
+end
+# Derivative of utility function wrt capital k' (planner's problem)
 function d_utility_kp(k,z,kp,l,p::Par)
     @unpack α,δ,σ,η,c_min = p
     c = z*(k^α)*(l^(1-α))+(1-δ)*k-kp
@@ -135,7 +151,39 @@ function d_utility_kp(k,z,kp,l,p::Par)
     end
     return -d_u
 end
-
+# Derivative of utility function wrt capital k' (from worker's problem in RCE)
+function d_utility_kp_rce(k,z,kp,l,w,r,p::Par)
+    @unpack α,δ,σ,η,c_min = p
+    c = max.((1+r).*k.+ w.*l.- kp,c_min)
+    d_u = c.^(-σ)
+    return -d_u
+end
+# Function that returns equilibrium wage (MPL)
+function wage(z,K,L,p::Par)
+    @unpack α=p
+    return (1-α).*z.*(K.^α).*(L.^(-α))
+end
+# Function that returns equilibrium capital rental rate (MPK)
+function rentalrate(z,K,L,p::Par)
+    @unpack α,δ=p
+    return α.*z.*(K.^(α-1)).*(L.^(1-α)).-δ
+end
+# Function that returns aggregate capital policy function from individual one
+function G_kp_eq(g_kp,k,z)
+    return g_kp[k,z,k]
+end
+# Function that returns aggregate labor policy function from individual one
+function G_l_eq(g_l,k,z)
+    return g_l[k,z,k]
+end
+# Function that returns aggregate labor policy function from individual one
+function G_c_eq(g_c,k,z)
+    return g_c[k,z,k]
+end
+# Function that returns equilibrium value function (individual states equal aggregates)
+function V_eq(v,k,z)
+    return v[k,z,k]
+end
 # Function to distretize AR(1) markov process with Rouwenhorst (1995)
 function Rouwenhorst95(N,p::Par)
     @unpack ρ,σ_η=p
@@ -173,24 +221,133 @@ end
         θ_k::Float64    = 1     # Default Curvature of k_grid
         n_k::Int64      = 20    # Default Size of k_grid
         n_k_fine::Int64 = 1000  # Default Size of fine grid for interpolation
-        n_z::Int64      = 10    # Default size of discretized grid for productivity as a markov process
         scale_type::Int64 = 1   # Default grid type (polynomial)
         k_grid          = Make_K_Grid(n_k,θ_k,p)    # k_grid for model solution
         k_grid_fine     = Make_K_Grid(n_k_fine,1,p) # Fine grid for interpolation
+        # Productivity process
+        n_z::Int64     = 10     # Default size of discretized grid for productivity as a markov process
+        log_z          = Rouwenhorst95(n_z,p)[1]
+        Π              = Rouwenhorst95(n_z,p)[2]
+        z_grid         = exp.(log_z)
+        # State matrices
+        k_mat          = repeat(k_grid,1,n_z,n_k)
+        z_mat          = repeat(z_grid',n_k,1,n_k)
         # Value and policy functions
-        V         = Array{Float64}(undef,n_k,n_z)   # Value Function
-        G_kp      = Array{Float64}(undef,n_k,n_z)       # Policy Function for capital k'
-        G_c       = Array{Float64}(undef,n_k,n_z)       # Policy Function for consumption c
-        G_l       = Array{Float64}(undef,n_k,n_z)       # Policy Function for labor l
+        V         = Array{Float64}(undef,n_k,n_z)       # Value Function in equilibrium (individual states equal aggregate states)
+        v         = Array{Float64}(undef,n_k,n_z,n_k)   # Value Function off-equilibrium (for all combinations of individual and aggregate states)
+        g_kp      = Array{Float64}(undef,n_k,n_z,n_k)   # Individual Policy Function for capital k'
+        G_kp      = Array{Float64}(undef,n_k,n_z)       # Aggregate Policy Function for capital k'
+        g_c       = Array{Float64}(undef,n_k,n_z,n_k)     # Individual Policy Function for consumption c
+        G_c       = Array{Float64}(undef,n_k,n_z)       # Aggregate Policy Function for consumption c
+        g_l       = Array{Float64}(undef,n_k,n_z,n_k)   # individual Policy Function for labor l
+        G_l       = Array{Float64}(undef,n_k,n_z)       # Aggregate Policy Function for labor l
         V_fine    = Array{Float64}(undef,n_k_fine,n_z)  # Interpolated Value Function
-        G_kp_fine = Array{Float64}(undef,n_k_fine,n_z)  # Interpolated Policy Function for capial k'
-        G_c_fine  = Array{Float64}(undef,n_k_fine,n_z)  # Interpolated Policy Function for consumption c
-        G_l_fine  = Array{Float64}(undef,n_k_fine,n_z)  # Interpolated Policy Function for labor l
+        G_kp_fine = Array{Float64}(undef,n_k_fine,n_z)  # Interpolated Aggregate Policy Function for capial k'
+        G_c_fine  = Array{Float64}(undef,n_k_fine,n_z)  # Interpolated Aggregate Policy Function for consumption c
+        G_l_fine  = Array{Float64}(undef,n_k_fine,n_z)  # Interpolated Aggregate Policy Function for labor l
         Euler     = Array{Float64}(undef,n_k_fine,n_z)  # Errors in Euler equation
-        z_grid    = Array{Float64}(undef,n_z)       # discretized grid for productivity
-        Π         = Array{Float64}(undef,n_z,n_z)   # Probability transition matrix for productivity
     end
     M = Model()
+
+# Function that finds the fixed point of the value function as a recursive competitive equilibrium (RCE)
+function RCE_fixedpoint(T::Function,M::Model)
+            ### T : Bellman operator (interior loop) ###
+            ### M : Model structure                  ###
+    # Unpack model structure
+    @unpack p,n_k,n_k_fine,θ_k,k_grid,k_grid_fine,n_z,V_fine,G_kp,G_l,G_kp_fine,G_c_fine,G_l_fine,Euler,z_grid,Π,k_mat,z_mat = M
+    # VFI paramters
+    @unpack max_iter, dist_tol = p
+            ### Initialize variables for first iteration ###
+    # Aggregate policy function for capital
+    G_kp_old = k_mat[:,:,1]
+    # Aggregate policy function for labor
+    G_l_old = fill(l_ss,n_k,n_z)
+    # initialize wages and rental rate
+    w_init = wage(z_mat[:,:,1],k_mat[:,:,1],G_l_old,p)
+    r_init = rentalrate(z_mat[:,:,1],k_mat[:,:,1],G_l_old,p)
+    # Value function
+    v_old = zeros(n_k,n_z,n_k)
+    for i in 1:n_z
+        for j in 1:n_k
+            v_old[:,i,j] = utility_rce(k_mat[:,i,j],z_mat[:,i,j],zeros(n_k),fill(l_ss,n_k),w_init[j,i],r_init[j,i],p) # value function including off-equilibrium
+        end
+    end
+    V_old = map((x,y)->V_eq(v_old,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1)) # value function imposing equiilibrium
+    v_dist = 1 # Initialize distance between old and new value function
+    iter = 1
+    println(" ")
+    println("------------------------")
+    println("VFI - n_k=$n_k - grid curvature θ_k=$θ_k - n_z=$n_z")
+    # Start RCE
+    while iter <= max_iter
+        # Update value function and policy functions
+        if 100*v_dist < 0.00001
+            a = 0.05
+        else
+            a = 0.2
+        end
+        # Call Bellman operator and get new value function and individual policy functions
+        v_new,g_kp,g_l = T(Model(M,v=copy(v_old),G_kp=copy(G_kp_old),G_l=copy(G_l_old)))[1:3]
+        # update Aggregate policy functions by imposing equilibrium conditions (K=k,L=l)
+        G_kp_new = map((x,y)->G_kp_eq(g_kp,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+        G_l_new = map((x,y)->G_l_eq(g_l,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+        V_new = map((x,y)->V_eq(v_new,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+        #v_dist = maximum(abs.(V_new./V_old.-1))
+        #v_dist = maximum(abs.(v_new./v_old.-1)) # value function off-eq
+        #v_dist = maximum([maximum(abs.(G_kp_new./G_kp_old.-1)),maximum(abs.(G_l_new./G_l_old.-1))]) # policy functions
+        # dampening the update
+        v_new = a.*v_new.+(1-a).*v_old
+        G_kp_new = a.*G_kp_new.+(1-a).*G_kp_old
+        G_l_new = a.*G_l_new.+(1-a).*G_l_old
+        # Update value function and distance between previous and current iteration
+        #v_dist = maximum(abs.(V_new./V_old.-1))
+        #v_dist = maximum(abs.(v_new./v_old.-1)) # value function
+        v_dist = maximum([maximum(abs.(G_kp_new./G_kp_old.-1)),maximum(abs.(G_l_new./G_l_old.-1))]) # policy functions
+        V_old = V_new
+        v_old = v_new
+        G_kp_old = G_kp_new
+        G_l_old = G_l_new
+        # Report progress
+        println("   RCE outer aggregate policy Loop: iter=$iter, dist=",100*v_dist," %")
+        # Report progress every 100 iterations
+        #if mod(iter,100)==0
+        #    println("   VFI Loop: iter=$iter, dist=",100*V_dist,"%")
+        #end
+        # Check if converged
+        if v_dist <= dist_tol
+            v_new, g_kp, g_l, g_c = T(Model(M,v=copy(v_new),G_kp=copy(G_kp_new),G_l=copy(G_l_new)))
+            println("VFI - n_k=$n_k - θ_k=$θ_k")
+            println("Converged after $iter iterations with a distance of ",100*v_dist," %")
+            println("------------------------")
+            println(" ")
+            # Impose equilibrium
+            G_kp = map((x,y)->G_kp_eq(g_kp,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+            G_l = map((x,y)->G_l_eq(g_l,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+            G_c = map((x,y)->G_c_eq(g_c,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+            V = map((x,y)->V_eq(v_new,x,y),repeat(sortperm(k_mat[:,1,1]),1,n_z),repeat(sortperm(k_mat[1,:,1])',n_k,1))
+            # Interpolate to fine grid on capital using natural cubic spline if it converged
+            for i in 1:n_z
+                V_ip = ScaledInterpolations(M.k_grid,V[:,i], FritschButlandMonotonicInterpolation()) # Monotonic spline because I know that the value function is always increasing in capital
+                    V_fine[:,i] = V_ip.(collect(M.k_grid_fine))
+                G_kp_ip = ScaledInterpolations(M.k_grid,G_kp[:,i], BSpline(Cubic(Line(OnGrid()))))
+                    G_kp_fine[:,i] = G_kp_ip.(collect(M.k_grid_fine))
+                G_c_ip = ScaledInterpolations(M.k_grid,G_c[:,i], BSpline(Cubic(Line(OnGrid()))))
+                    G_c_fine[:,i] = G_c_ip.(collect(M.k_grid_fine))
+                G_l_ip = ScaledInterpolations(M.k_grid,G_l[:,i], BSpline(Cubic(Line(OnGrid()))))
+                    G_l_fine[:,i] = G_l_ip.(collect(M.k_grid_fine))
+                # Percent Euler Error on fine grid
+                #Euler[:,i] = Euler_Error(M.k_grid_fine,G_kp_fine,G_kp_ip.(collect(G_kp_fine)),G_l_fine,G_l_ip.(collect(G_kp_fine)),p)
+            end
+            # Update model with solution
+            M = Model(M; V=V,G_kp=G_kp,G_c=G_c,G_l=G_l,V_fine=V_fine,g_kp=g_kp,g_l=g_l,g_c=g_c,G_kp_fine=G_kp_fine,G_c_fine=G_c_fine,G_l_fine=G_l_fine)
+            return M
+        end
+        # If it didn't converge, go to next iteration
+        iter += 1
+    end
+    # If it didn't converge, return error
+    error("Error in VFI - Solution not found")
+end
 
 # Function that finds the fixed point of the value function, then interpolates between grid points
 function VFI_fixedpoint(T::Function,M::Model)
@@ -254,6 +411,152 @@ function VFI_fixedpoint(T::Function,M::Model)
     end
     # If it didn't converge, return error
     error("Error in VFI - Solution not found")
+end
+
+# Bellman equation using endogenous grid method (EGM) for recursive competitive equilibrium (RCE)
+function T_EGM_RCE(M::Model)
+    @unpack p,n_k,k_grid,n_z,v,g_kp,G_kp,g_c,G_c,g_l,G_l,z_grid,Π,z_grid,k_mat,z_mat = M
+    @unpack β,α,δ,η,σ,c_min = p
+    # Check monotonicity of V
+    if any( diff(v,dims=1).<0 )
+        error("v needs to be monotone for EGM to work")
+    end
+    # Emax
+    v_Gk = zeros(n_k,n_z,n_k);
+    Emax = zeros(n_k,n_z,n_k);
+    for i in 1:n_k
+        for j in 1:n_z
+            v_Gk[i,j,:] = Spline1D(k_grid,v[i,j,:];k=1,bc="extrapolate").(G_kp[:,j])
+            #v_Gk[i,j,:] = ScaledInterpolations(k_grid,v[i,j,:], BSpline(Cubic(Line(OnGrid())))).(G_kp[:,j]) # interpolate value function along aggregate capital
+        end
+    end
+    for i in 1:n_k
+        Emax[:,:,i] = (β*Π*v_Gk[:,:,i]')'
+    end
+    # Check Monotonicity of Emax
+    if any( diff(Emax,dims=1).<0 )
+        error("Emax needs to be monotone for EGM to work")
+    end
+    # Derivative of Emax wrt k' (interpolate first)
+    dEmax = zeros(n_k,n_z,n_k)
+    for i in 1:n_z               # for all possible aggregate productivity...
+        for j in 1:n_k           # for all possible aggregate capital...
+            Emax_ip = ScaledInterpolations(k_grid,Emax[:,i,j], FritschButlandMonotonicInterpolation()) # interpolate Emax along individual capital dimension
+            dEmax_ip(x)  = ForwardDiff.derivative(Emax_ip,x)
+            dEmax[:,i,j] = dEmax_ip.(k_grid)   # Evaluate derivative at each capital grid point
+        end
+    end
+    # Check monotonicity for dEmax
+    if any( dEmax.<0 )
+        error("dEmax needs to be monotone for EGM to work")
+    end
+    # Function that returns consumption ̃c(k',z) that satisfies euler (FOC for k')
+    function ctilde(dEmax)
+        if dEmax <= 0.0
+            return c_min
+        else
+            return dEmax^(-1/σ)
+        end
+    end
+    # Boundaries for labor
+    l_min = 1E-16
+    l_max = 1.0
+    # Lower bound for capital
+    k_min = k_grid[1]
+    # Wages and rental rates for capital
+    w = wage(z_mat[:,:,1],k_mat[:,:,1],G_l,p)
+    r = rentalrate(z_mat[:,:,1],k_mat[:,:,1],G_l,p)
+    # Loop for grid of aggregate productivity today z
+    k_endo = zeros(n_k,n_z,n_k);
+    v_endo = zeros(n_k,n_z,n_k);
+    #g_c_endo = zeros(n_k,n_z,n_k);
+    for i in 1:n_z # Loop for grid of aggregate productivity z
+        for j in 1:n_k # Loop for grid of aggregate capital today K
+            for h in 1:n_k # Loop for grid of individual capital tomorrow k'
+                g_c[h,i,j] = ctilde(dEmax[h,i,j]) # consumption from euler eq
+                g_l[h,i,j] = min(max(((g_c[h,i,j]^(-σ))*w[j,i]/χ)^(1/η),l_min),l_max) # Labor from FOC (analytical)
+                k_endo[h,i,j] = max((g_c[h,i,j]+k_grid[h]-w[j,i]*g_l[h,i,j])/(1+r[j,i]),k_min) # Endogenous capital today k(k',z,K)
+                #g_c_endo[h,i,j] = max((1+r[j,i])*k_endo[h,i,j]+w[j,i]*g_l[h,i,j]-k_grid[h],c_min)
+                v_endo[h,i,j] = (g_c[h,i,j]^(1-σ))/(1-σ) -(χ*g_l[h,i,j]^(1+η))/(1+η) + Emax[h,i,j] #  utility(k_endo[h,i,j],z_grid[i],k_grid[h],g_l[h,i,j],p) + Emax[h,i,j]
+            end
+            # sort endogenous grid
+            sort_id = sortperm(k_endo[:,i,j])
+            g_c[:,i,j] = g_c[:,i,j][sort_id]
+            #g_c_endo[:,i,j] = g_c_endo[:,i,j][sort_id]
+            g_l[:,i,j] = g_l[:,i,j][sort_id]
+            k_endo[:,i,j] = k_endo[:,i,j][sort_id]
+            v_endo[:,i,j] = v_endo[:,i,j][sort_id]
+            Emax[:,i,j] = Emax[:,i,j][sort_id]
+        end
+    end
+                ### FUNCTIONS USED FOR MANUAL OPTIMIZATION IF CAPITAL IS OUT OF BOUNDS ###
+    # bounds on capital
+    kp_min = k_grid[1]
+    get_kp_max(k,l,z,w,r) = (1+r)*k + w*l - c_min
+    # Interpolate to exogenous grid
+    for i in 1:n_z
+        for j in 1:n_k
+            v[:,i,j] = Spline1D(k_endo[:,i,j],v_endo[:,i,j];k=1).(collect(k_grid))
+            g_c[:,i,j] = Spline1D(k_endo[:,i,j],g_c[:,i,j];k=1).(collect(k_grid))
+            g_l[:,i,j] = min.(max.(((g_c[:,i,j].^(-σ)).*w[j,i]./χ).^(1/η),l_min),l_max)
+            g_kp[:,i,j] = (1+r[j,i]).*collect(k_grid).+ w[j,i].*g_l[:,i,j].- g_c[:,i,j]
+            # manual optimization if g_kp is out of bounds or monotonicity is not satisfied
+            for ind = unique(vcat(findall(<(k_endo[1,i,j]),g_kp[:,i,j]),findall(<(k_endo[1,i,j]),collect(k_grid)),findall(>(k_endo[end,i,j]),collect(k_grid))))#,findall(diff(v_endo[:,i,j],dims=1).<0)))
+            #for ind = unique(vcat(findall(<(k_endo[1,i,j]),g_kp[:,i,j]),findall(>(k_endo[end,i,j]),collect(k_grid)),findall(diff(v_endo[:,i,j],dims=1).<0),findall(diff(Emax[:,i,j],dims=1).<0)))
+                Emax_ip = ScaledInterpolations(k_grid,Emax[:,i,j], FritschButlandMonotonicInterpolation())
+                dEmax_ip(x)  = ForwardDiff.derivative(Emax_ip,x)
+                # Main Objective function
+                Obj_fn(k,z,kp,l,w,r,p::Par) = -utility_rce(k,z,kp,l,w,r,p) - Emax_ip(kp)
+                # Function that returns derivative of objective function wrt k'
+                d_Obj_fn_kp(k,z,kp,l,w,r,p::Par) = d_utility_kp_rce(k,z,kp,l,w,r,p) + dEmax_ip(kp)
+                # Derivative of objective function wrt labor l
+                d_Obj_fn_l(k,z,kp,l,w,r,p::Par) = d_utility_l_rce(k,z,kp,l,w,r,p)
+                # Define function that finds optimal labor l given (k,z,k') and returns objective function conditional on optimal labor
+                function Obj_fn_condl(k,z,kp,w,r,p::Par)
+                    # Check for corner solutions on labor
+                    dobj_min = d_utility_l_rce(k,z,kp,l_min,w,r,p)
+                    dobj_max = d_utility_l_rce(k,z,kp,l_max,w,r,p)
+                    if dobj_min <= 0
+                        return Obj_fn(k,z,kp,l_min,w,r,p),l_min
+                    elseif dobj_max >= 0
+                        return Obj_fn(k,z,kp,l_max,w,r,p),l_max
+                    else
+                        # if no corner solutions, find interior solution
+                        min_result = optimize(x->d_utility_l_rce(k,z,kp,x,w,r,p).^2,l_min,l_max,Brent())
+                        l = min_result.minimizer
+                        return Obj_fn(k,z,kp,l,w,r,p),l
+                    end
+                end
+                kp_max = min(get_kp_max(k_grid[ind],1.0,z_grid[i],w[j,i],r[j,i]),k_grid[end])
+                # Check for corner solutions on capital
+                l_kp_min = Obj_fn_condl(k_grid[ind],z_grid[i],kp_min,w[j,i],r[j,i],p)[2]
+                l_kp_max = Obj_fn_condl(k_grid[ind],z_grid[i],kp_max,w[j,i],r[j,i],p)[2]
+                dobj_min = d_Obj_fn_kp(k_grid[ind],z_grid[i],kp_min,l_kp_min,w[j,i],r[j,i],p)
+                dobj_max = d_Obj_fn_kp(k_grid[ind],z_grid[i],kp_max,l_kp_max,w[j,i],r[j,i],p)
+                if dobj_min <= 0.0
+                    g_kp[ind,i,j] = kp_min
+                    g_l[ind,i,j] = l_kp_min
+                    g_c[ind,i,j] = z_grid[i]*(k_grid[ind]^(α))*(g_l[ind,i,j]^(1-α))+(1-δ)*(k_grid[ind])-g_kp[ind,i,j]
+                    v[ind,i,j] = -Obj_fn(k_grid[ind],z_grid[i],kp_min,l_kp_min,w[j,i],r[j,i],p)
+                elseif dobj_max >= 0.0
+                    g_kp[ind,i,j] = kp_max
+                    g_l[ind,i,j] = l_kp_max
+                    g_c[ind,i,j] = z_grid[i]*(k_grid[ind]^(α))*(g_l[ind,i,j]^(1-α))+(1-δ)*(k_grid[ind])-g_kp[ind,i,j]
+                    v[ind,i,j] = -Obj_fn(k_grid[ind],z_grid[i],kp_max,l_kp_max,w[j,i],r[j,i],p)
+                else
+                    # If no corner solution, find interior solution
+                    min_result = optimize(x->Obj_fn_condl(k_grid[ind],z_grid[i],x,w[j,i],r[j,i],p)[1],kp_min,kp_max,Brent())
+                    # Record results
+                    v[ind,i,j] = -min_result.minimum
+                    g_kp[ind,i,j] = min_result.minimizer
+                    g_l[ind,i,j] = Obj_fn_condl(k_grid[ind],z_grid[i],g_kp[ind,i,j],w[j,i],r[j,i],p)[2]
+                    g_c[ind,i,j] = z_grid[i]*(k_grid[ind]^(α))*(g_l[ind,i,j]^(1-α))+(1-δ)*(k_grid[ind])-g_kp[ind,i,j]
+                end
+            end
+        end
+    end
+    # Return results
+    return v, g_kp, g_l, g_c
 end
 
 # Bellman operator for the nested continuous choice of labor and capital tomorrow with capital and productivity as state variables
@@ -394,7 +697,6 @@ function T_EGM(M::Model)
     return V, G_kp, G_c, G_l
 end
 
-
 # Bellman operator for the nested continuous choice of labor and capital tomorrow with capital and productivity as state variables
 function T_nested_max(M::Model)
     @unpack p,n_k,k_grid,n_z,V,G_kp,G_c,G_l,z_grid,Π,z_grid = M
@@ -473,14 +775,11 @@ function T_nested_max(M::Model)
 end
 
                 ### Solve the problem for θ_k=2,n_z=10,n_k=50 ###
-# Get discrete grid for productivity and transition matrix
-(log_z,Π) = Rouwenhorst95(10,p)[1:2]
-z = exp.(log_z)
-# Get solution
-@time Mc  = VFI_fixedpoint(T_EGM,Model(n_k=50,θ_k=2,n_z=10,z_grid=z,Π=Π))
+# Get solution of RCE
+@time Mc  = RCE_fixedpoint(T_EGM_RCE,Model(n_k=20,θ_k=2,n_z=5))
 # Interpolate the value function along the z dimension for 3d plot
-z_grid = range(z[1],z[end],length=size(z)[1])
-z_grid_fine = range(z[1],z[end],length=Mc.n_k_fine)
+z_grid = range(Mc.z_grid[1],Mc.z_grid[end],length=Mc.n_z)
+z_grid_fine = range(Mc.z_grid[1],Mc.z_grid[end],length=Mc.n_k_fine)
 V_fine_3d = zeros(Mc.n_k_fine,Mc.n_k_fine)
 V_fine_33d = [ScaledInterpolations(z_grid,Mc.V_fine[i,:], BSpline(Cubic(Line(OnGrid())))).(collect(z_grid_fine)) for i in 1:Mc.n_k_fine]
 for i in 1:Mc.n_k_fine
@@ -489,7 +788,25 @@ end
 # Surface and contour plot of the value function
 gr()
 x= Mc.k_grid_fine; y=z_grid_fine; f=V_fine_3d;
-plot(x,y,f, st=:surface,xlabel="capital",ylabel="productivity",title="Value Function (surface) -EGM: n_k=$(Mc.n_k) - n_z=$(Mc.n_z) - θ_k=$(Mc.θ_k)") # Surface plot
-savefig("./Figures/surface_vf.pdf")
-plot(x,y,f, st=:contour,xlabel="capital",ylabel="productivity",nlevels=100, width=2, size=[800,480],title="Value Function (contour) -EGM: n_k=$(Mc.n_k) - n_z=$(Mc.n_z) - θ_k=$(Mc.θ_k)") # Contour plot
-savefig("./Figures/contour_vf.pdf")
+plot(x,y,f, st=:surface,xlabel="capital",ylabel="productivity",title="Value Function (surface) -RCE: n_k=$(Mc.n_k) - n_z=$(Mc.n_z) - θ_k=$(Mc.θ_k)") # Surface plot
+savefig("./Figures/surface_vf_rce.pdf")
+plot(x,y,f, st=:contour,xlabel="capital",ylabel="productivity",nlevels=100, width=2, size=[800,480],title="Value Function (contour) -RCE: n_k=$(Mc.n_k) - n_z=$(Mc.n_z) - θ_k=$(Mc.θ_k)") # Contour plot
+savefig("./Figures/contour_vf_rce.pdf")
+
+# Get solution of planner's problem
+@time Mcc = VFI_fixedpoint(T_EGM,Model(n_k=20,θ_k=2,n_z=5))
+# Interpolate the value function along the z dimension for 3d plot
+z_grid = range(Mcc.z_grid[1],Mcc.z_grid[end],length=Mcc.n_z)
+z_grid_fine = range(Mcc.z_grid[1],Mcc.z_grid[end],length=Mcc.n_k_fine)
+V_fine_3d = zeros(Mcc.n_k_fine,Mcc.n_k_fine)
+V_fine_33d = [ScaledInterpolations(z_grid,Mcc.V_fine[i,:], BSpline(Cubic(Line(OnGrid())))).(collect(z_grid_fine)) for i in 1:Mcc.n_k_fine]
+for i in 1:Mcc.n_k_fine
+    V_fine_3d[i,:] = V_fine_33d[i]
+end
+# Surface and contour plot of the value function
+gr()
+x= Mcc.k_grid_fine; y=z_grid_fine; f=V_fine_3d;
+plot(x,y,f, st=:surface,xlabel="capital",ylabel="productivity",title="Value Function (surface) -RCE: n_k=$(Mc.n_k) - n_z=$(Mc.n_z) - θ_k=$(Mc.θ_k)") # Surface plot
+savefig("./Figures/surface_vf_planner.pdf")
+plot(x,y,f, st=:contour,xlabel="capital",ylabel="productivity",nlevels=100, width=2, size=[800,480],title="Value Function (contour) -RCE: n_k=$(Mc.n_k) - n_z=$(Mc.n_z) - θ_k=$(Mc.θ_k)") # Contour plot
+savefig("./Figures/contour_vf_planner.pdf")
