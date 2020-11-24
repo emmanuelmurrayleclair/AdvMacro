@@ -173,6 +173,7 @@ end
 function G_l_eq(g_l,k,z)
     return g_l[k,z,k]
 end
+
 # Function that returns aggregate labor policy function from individual one
 function G_c_eq(g_c,k,z)
     return g_c[k,z,k]
